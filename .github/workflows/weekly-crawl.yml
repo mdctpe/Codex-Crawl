@@ -28,4 +28,10 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           GOOGLE_MAPS_API_KEY: ${{ secrets.GOOGLE_MAPS_API_KEY }}
+          NLMA_BMLIC_API_URL: ${{ vars.NLMA_BMLIC_API_URL }}
+          PERMIT_START_DATE: ${{ vars.PERMIT_START_DATE }}
+          PERMIT_END_DATE: ${{ vars.PERMIT_END_DATE }}
+          MIN_CONSTRUCTION_COST: ${{ vars.MIN_CONSTRUCTION_COST }}
+          MAX_PROJECTS: ${{ vars.MAX_PROJECTS }}
+          TARGET_USAGES: ${{ vars.TARGET_USAGES }}
         run: python -m src.main
