@@ -288,7 +288,7 @@ def main() -> int:
         print("⚠ Supabase 未設定，資料只會 print，不會寫入。")
 
     api_url = get_env("NLMA_BMLIC_API_URL", DEFAULT_NLMA_BMLIC_API_URL)
-start_date = get_env("PERMIT_START_DATE", "2023-01-01")
+    start_date = get_env("PERMIT_START_DATE", "2023-01-01")
     end_date = get_env("PERMIT_END_DATE", datetime.now(timezone.utc).date().isoformat())
     min_cost = parse_int_env("MIN_CONSTRUCTION_COST", DEFAULT_MIN_CONSTRUCTION_COST)
     max_projects = parse_int_env("MAX_PROJECTS", DEFAULT_MAX_PROJECTS)
