@@ -287,4 +287,59 @@ def main() -> int:
     else:
         print("⚠ Supabase 未設定，資料只會 print，不會寫入。")
 
-    api_url = get_env("NLMA_BMLIC_
+    api_url = get_env("NLMA_BMLIC_API_URL", DEFAULT_NLMA_BMLIC_API_URL)
+start_date = get_env("PERMIT_START_DATE", "2023-01-01")
+    end_date = get_env("PERMIT_END_DATE", datetime.now(timezone.utc).date().isoformat())
+    min_cost = parse_int_env("MIN_CONSTRUCTION_COST", DEFAULT_MIN_CONSTRUCTION_COST)
+    max_projects = parse_int_env("MAX_PROJECTS", DEFAULT_MAX_PROJECTS)
+    target_usages = parse_list_env("TARGET_USAGES", DEFAULT_TARGET_USAGES)
+    google_key = os.getenv("GOOGLE_MAPS_API_KEY", "").strip()
+
+    print(f"Source: {api_url}")
+    print(f"Filters: {start_date} ~ {end_date}, min_cost={min_cost:,}, max={max_projects}")
+
+    if not google_key:
+        print("⚠ 未設定 GOOGLE_MAPS_API_KEY，跳過 Google Maps 補強。")
+
+    raw_records = fetch_government_records(api_url, start_date, end_date)
+    if not raw_records:
+        print("No records returned. Exiting successfully.")
+        return 0
+
+    permits = [normalize_remote_permit(r) for r in raw_records]
+    filtered = [
+        p for p in permits
+        if permit_matches(p, start_date, end_date, min_cost, target_usages)
+    ]
+    filtered.sort(key=lambda p: int(p["construction_cost"]), reverse=True)
+
+    if not filtered:
+        print("Records fetched but none matched the filters.")
+        return 0
+
+    print(f"\n✓ 符合條件：{len(filtered)} 筆，處理前 {max_projects} 筆。\n")
+
+    for permit in filtered[:max_projects]:
+        print(
+            f"建案: {permit['project_name']} | "
+            f"建商: {permit['developer_name']} | "
+            f"造價: {permit['construction_cost']:,} | "
+            f"地址: {permit['site_address']}"
+        )
+
+        maps_data = None
+        if google_key:
+            query = f"{permit['site_address']} {permit['developer_name']}"
+            maps_data = search_google_maps(query, google_key)
+            if maps_data:
+                print(f"  Maps: {maps_data['name']} | {maps_data['formatted_address']}")
+
+        if supabase_ready:
+            upsert_to_supabase(supabase_url, supabase_key, permit, maps_data)
+
+    print("\nCrawler completed successfully.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
