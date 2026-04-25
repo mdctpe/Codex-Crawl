@@ -7,17 +7,13 @@ from typing import Any
 
 import requests
 
-DEFAULT_NLMA_BMLIC_API_URL = (
-    "https://cloudbm.nlma.gov.tw/eweb/OpenData/OAS/EIX_RSAPI_V1/opendata/bmlic"
-)
+DEFAULT_TARGET_USAGES: tuple[str, ...] = ()
+DEFAULT_MIN_CONSTRUCTION_COST = 0
+
 TAICHUNG_JSON_URL = (
     "https://newdatacenter.taichung.gov.tw/api/v1/no-auth/resource.download"
     "?rid=0bf1850e-4295-433a-8ebc-9cdf9192eac5"
 )
-DEFAULT_TARGET_USAGES = ("旅館", "百貨", "集合住宅", "商業", "商辦")
-DEFAULT_MIN_CONSTRUCTION_COST = 50_000_000
-DEFAULT_MAX_PROJECTS = 50
-REQUEST_TIMEOUT_SECONDS = 45
 
 
 def load_environment() -> None:
