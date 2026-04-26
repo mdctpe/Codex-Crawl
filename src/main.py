@@ -9,6 +9,10 @@ import requests
 
 DEFAULT_TARGET_USAGES: tuple[str, ...] = ()
 DEFAULT_MIN_CONSTRUCTION_COST = 0
+DEFAULT_MAX_PROJECTS = 50
+DEFAULT_NLMA_BMLIC_API_URL = (
+    "https://cloudbm.nlma.gov.tw/eweb/OpenData/OAS/EIX_RSAPI_V1/opendata/bmlic"
+)
 
 TAICHUNG_JSON_URL = (
     "https://newdatacenter.taichung.gov.tw/api/v1/no-auth/resource.download"
