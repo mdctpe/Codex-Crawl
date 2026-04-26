@@ -34,4 +34,13 @@ jobs:
           MIN_CONSTRUCTION_COST: ${{ vars.MIN_CONSTRUCTION_COST }}
           MAX_PROJECTS: ${{ vars.MAX_PROJECTS }}
           TARGET_USAGES: ${{ vars.TARGET_USAGES }}
+          RESULTS_PATH: results/results.json
         run: python -m src.main
+
+      - name: Upload crawler results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: weekly-crawl-results
+          path: results/results.json
+          if-no-files-found: error

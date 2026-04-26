@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from datetime import date, datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import requests
@@ -13,11 +14,12 @@ DEFAULT_MAX_PROJECTS = 50
 DEFAULT_NLMA_BMLIC_API_URL = (
     "https://cloudbm.nlma.gov.tw/eweb/OpenData/OAS/EIX_RSAPI_V1/opendata/bmlic"
 )
-
 TAICHUNG_JSON_URL = (
     "https://newdatacenter.taichung.gov.tw/api/v1/no-auth/resource.download"
     "?rid=0bf1850e-4295-433a-8ebc-9cdf9192eac5"
 )
+REQUEST_TIMEOUT_SECONDS = 45
+DEFAULT_RESULTS_PATH = "results/results.json"
 
 
 def load_environment() -> None:
@@ -48,6 +50,16 @@ def parse_list_env(name: str, fallback: tuple[str, ...]) -> tuple[str, ...]:
         return fallback
     values = tuple(item.strip() for item in raw.split(",") if item.strip())
     return values or fallback
+
+
+def write_results(results_path: str, payload: dict[str, Any]) -> None:
+    output_path = Path(results_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    print(f"Wrote crawler results to: {output_path}")
 
 
 def parse_number(value: Any) -> int:
@@ -91,22 +103,41 @@ def normalize_date(value: Any) -> str:
     return raw
 
 
-# ── NLMA 全國建照 ─────────────────────────────────────────────────────────────
-
-def fetch_nlma_records(api_url: str, start_date: str, end_date: str) -> list[dict[str, Any]]:
+def fetch_nlma_records(
+    api_url: str,
+    start_date: str,
+    end_date: str,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     print(f"[NLMA] 抓取中: {api_url}")
+    params = {"startDate": start_date, "endDate": end_date}
     try:
         response = requests.get(
             api_url,
-            params={"startDate": start_date, "endDate": end_date},
+            params=params,
             headers={"Accept": "application/json"},
             timeout=REQUEST_TIMEOUT_SECONDS,
         )
         response.raise_for_status()
-        payload = response.json()
-    except Exception as exc:
+    except requests.RequestException as exc:
         print(f"[NLMA] 抓取失敗: {exc}")
-        return []
+        return [], {
+            "status": "request_error",
+            "error": str(exc),
+            "request_params": params,
+        }
+
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        print(f"[NLMA] 回傳不是 JSON: {exc}")
+        return [], {
+            "status": "invalid_json",
+            "error": str(exc),
+            "http_status": response.status_code,
+            "content_type": response.headers.get("content-type", ""),
+            "body_preview": response.text[:500],
+            "request_params": params,
+        }
 
     if isinstance(payload, list):
         records = payload
@@ -121,46 +152,73 @@ def fetch_nlma_records(api_url: str, start_date: str, end_date: str) -> list[dic
     else:
         records = []
 
-    print(f"[NLMA] 取得 {len(records)} 筆原始資料")
-    return [r for r in records if isinstance(r, dict)]
+    normalized_records = [record for record in records if isinstance(record, dict)]
+    print(f"[NLMA] 取得 {len(normalized_records)} 筆原始資料")
+    return normalized_records, {
+        "status": "ok",
+        "http_status": response.status_code,
+        "content_type": response.headers.get("content-type", ""),
+        "record_count": len(normalized_records),
+        "request_params": params,
+    }
 
 
 def normalize_nlma_permit(record: dict[str, Any]) -> dict[str, Any]:
     site_address = str(
-        record.get("siteAddress") or record.get("address") or
-        record.get("addr") or record.get("建築地點") or record.get("地點") or ""
+        record.get("siteAddress")
+        or record.get("address")
+        or record.get("addr")
+        or record.get("建築地點")
+        or record.get("地點")
+        or ""
     ).strip() or "地址待補齊"
 
     usage = str(
-        record.get("usage") or record.get("用途") or
-        record.get("buildingUse") or record.get("buildUse") or ""
+        record.get("usage")
+        or record.get("用途")
+        or record.get("buildingUse")
+        or record.get("buildUse")
+        or ""
     ).strip()
 
     return {
         "permit_number": str(
-            record.get("permitNumber") or record.get("執照字號") or
-            record.get("licenseNo") or "unknown"
+            record.get("permitNumber")
+            or record.get("執照字號")
+            or record.get("licenseNo")
+            or "unknown"
         ).strip(),
         "project_name": str(
-            record.get("projectName") or record.get("工程名稱") or
-            record.get("caseName") or "未命名建案"
+            record.get("projectName")
+            or record.get("工程名稱")
+            or record.get("caseName")
+            or "未命名建案"
         ).strip(),
         "developer_name": str(
-            record.get("developerName") or record.get("起造人") or
-            record.get("owner") or record.get("申請人") or "待補"
+            record.get("developerName")
+            or record.get("起造人")
+            or record.get("owner")
+            or record.get("申請人")
+            or "待補"
         ).strip(),
         "architect_name": str(
-            record.get("architectName") or record.get("建築師") or
-            record.get("designer") or ""
+            record.get("architectName")
+            or record.get("建築師")
+            or record.get("designer")
+            or ""
         ).strip(),
         "site_address": site_address,
         "construction_cost": parse_number(
-            record.get("constructionCost") or record.get("造價") or
-            record.get("cost") or record.get("totalCost")
+            record.get("constructionCost")
+            or record.get("造價")
+            or record.get("cost")
+            or record.get("totalCost")
         ),
         "permit_issued_at": normalize_date(
-            record.get("permitIssuedAt") or record.get("issueDate") or
-            record.get("核照日期") or record.get("發照日期")
+            record.get("permitIssuedAt")
+            or record.get("issueDate")
+            or record.get("核照日期")
+            or record.get("發照日期")
         ),
         "usage": usage,
         "region": site_address[:3],
@@ -168,17 +226,27 @@ def normalize_nlma_permit(record: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-# ── 台中市建照 ────────────────────────────────────────────────────────────────
-
-def fetch_taichung_records() -> list[dict[str, Any]]:
+def fetch_taichung_records() -> tuple[list[dict[str, Any]], dict[str, Any]]:
     print(f"[台中市] 抓取中: {TAICHUNG_JSON_URL}")
     try:
-        response = requests.get(TAICHUNG_JSON_URL, timeout=45)
+        response = requests.get(TAICHUNG_JSON_URL, timeout=REQUEST_TIMEOUT_SECONDS)
         response.raise_for_status()
         data = response.json()
-    except Exception as exc:
+    except requests.RequestException as exc:
         print(f"[台中市] 抓取失敗: {exc}")
-        return []
+        return [], {
+            "status": "request_error",
+            "error": str(exc),
+        }
+    except ValueError as exc:
+        print(f"[台中市] 回傳不是 JSON: {exc}")
+        return [], {
+            "status": "invalid_json",
+            "error": str(exc),
+            "http_status": response.status_code,
+            "content_type": response.headers.get("content-type", ""),
+            "body_preview": response.text[:500],
+        }
 
     if isinstance(data, list):
         records = data
@@ -193,28 +261,38 @@ def fetch_taichung_records() -> list[dict[str, Any]]:
     else:
         records = []
 
-    print(f"[台中市] 取得 {len(records)} 筆原始資料")
-    return [r for r in records if isinstance(r, dict)]
+    normalized_records = [record for record in records if isinstance(record, dict)]
+    print(f"[台中市] 取得 {len(normalized_records)} 筆原始資料")
+    return normalized_records, {
+        "status": "ok",
+        "http_status": response.status_code,
+        "content_type": response.headers.get("content-type", ""),
+        "record_count": len(normalized_records),
+    }
 
 
 def normalize_taichung_permit(record: dict[str, Any]) -> dict[str, Any]:
     site_address = str(
-        record.get("起造人地址") or record.get("基地地址") or
-        record.get("address") or ""
+        record.get("起造人地址") or record.get("基地地址") or record.get("address") or ""
     ).strip() or "地址待補齊"
 
     usage = str(record.get("建築物用途") or record.get("用途") or "").strip()
     cost = parse_number(record.get("工程造價(元)") or record.get("工程造價") or 0)
 
     issued_raw = (
-        record.get("發照日期") or record.get("核發日期") or
-        record.get("permit_date") or ""
+        record.get("發照日期") or record.get("核發日期") or record.get("permit_date") or ""
     )
 
     return {
-        "permit_number": str(record.get("核發執照字號") or record.get("執照字號") or "unknown").strip(),
-        "project_name": str(record.get("工程名稱") or record.get("建案名稱") or "未命名建案").strip(),
-        "developer_name": str(record.get("起造人代表人") or record.get("起造人") or "待補").strip(),
+        "permit_number": str(
+            record.get("核發執照字號") or record.get("執照字號") or "unknown"
+        ).strip(),
+        "project_name": str(
+            record.get("工程名稱") or record.get("建案名稱") or "未命名建案"
+        ).strip(),
+        "developer_name": str(
+            record.get("起造人代表人") or record.get("起造人") or "待補"
+        ).strip(),
         "architect_name": str(record.get("設計人") or record.get("建築師") or "").strip(),
         "site_address": site_address,
         "construction_cost": cost,
@@ -224,8 +302,6 @@ def normalize_taichung_permit(record: dict[str, Any]) -> dict[str, Any]:
         "source_tag": "台中市",
     }
 
-
-# ── 篩選 + Supabase ───────────────────────────────────────────────────────────
 
 def permit_matches(
     permit: dict[str, Any],
@@ -240,7 +316,7 @@ def permit_matches(
         return False
     if permit_date and (permit_date < start_date or permit_date > end_date):
         return False
-    if target_usages and not any(kw in usage for kw in target_usages):
+    if target_usages and not any(keyword in usage for keyword in target_usages):
         return False
     return True
 
@@ -253,12 +329,17 @@ def search_google_maps(query: str, api_key: str) -> dict[str, str | None] | None
             timeout=30,
         )
         response.raise_for_status()
-    except Exception as exc:
+    except requests.RequestException as exc:
         print(f"  [Maps] 失敗 '{query}': {exc}")
         return None
-    results = response.json().get("results", [])
+
+    payload = response.json()
+    results = payload.get("results", [])
     if not results:
+        status = payload.get("status", "UNKNOWN")
+        print(f"  [Maps] 無結果 '{query}' (status: {status})")
         return None
+
     place = results[0]
     return {
         "formatted_address": place.get("formatted_address"),
@@ -325,11 +406,11 @@ def upsert_to_supabase(
         print(f"  ✗ 連線錯誤: {exc}")
 
 
-# ── 主程式 ────────────────────────────────────────────────────────────────────
-
 def main() -> int:
-    print(f"Crawler started at: {datetime.now(timezone.utc).isoformat()}")
+    started_at = datetime.now(timezone.utc).isoformat()
+    print(f"Crawler started at: {started_at}")
     load_environment()
+    results_path = get_env("RESULTS_PATH", DEFAULT_RESULTS_PATH)
 
     supabase_url = os.getenv("SUPABASE_URL", "").strip()
     supabase_key = os.getenv("SUPABASE_SERVICE_KEY", "").strip()
@@ -348,36 +429,84 @@ def main() -> int:
     google_key = os.getenv("GOOGLE_MAPS_API_KEY", "").strip()
     nlma_url = get_env("NLMA_BMLIC_API_URL", DEFAULT_NLMA_BMLIC_API_URL)
 
+    results_payload: dict[str, Any] = {
+        "started_at": started_at,
+        "finished_at": None,
+        "status": "running",
+        "results_path": results_path,
+        "sources": {
+            "nlma": {"url": nlma_url, "fetch": {}},
+            "taichung": {"url": TAICHUNG_JSON_URL, "fetch": {}},
+        },
+        "filters": {
+            "start_date": start_date,
+            "end_date": end_date,
+            "min_construction_cost": min_cost,
+            "max_projects": max_projects,
+            "target_usages": list(target_usages),
+        },
+        "supabase": {
+            "configured": supabase_ready,
+            "missing": [
+                name
+                for name, value in (
+                    ("SUPABASE_URL", supabase_url),
+                    ("SUPABASE_SERVICE_KEY", supabase_key),
+                )
+                if not value
+            ],
+        },
+        "google_maps": {
+            "configured": bool(google_key),
+        },
+        "raw_record_count": 0,
+        "matched_record_count": 0,
+        "results": [],
+    }
+
     print(f"篩選條件: {start_date} ~ {end_date}, 最低造價={min_cost:,}, 最多={max_projects}")
 
     if not google_key:
         print("⚠ 未設定 GOOGLE_MAPS_API_KEY，跳過 Google Maps 補強。")
 
-    # ── 抓資料：NLMA + 台中市 ──
     all_permits: list[dict[str, Any]] = []
 
-    nlma_raw = fetch_nlma_records(nlma_url, start_date, end_date)
-    all_permits += [normalize_nlma_permit(r) for r in nlma_raw]
+    nlma_raw, nlma_meta = fetch_nlma_records(nlma_url, start_date, end_date)
+    results_payload["sources"]["nlma"]["fetch"] = nlma_meta
+    all_permits += [normalize_nlma_permit(record) for record in nlma_raw]
 
-    taichung_raw = fetch_taichung_records()
-    all_permits += [normalize_taichung_permit(r) for r in taichung_raw]
+    taichung_raw, taichung_meta = fetch_taichung_records()
+    results_payload["sources"]["taichung"]["fetch"] = taichung_meta
+    all_permits += [normalize_taichung_permit(record) for record in taichung_raw]
 
+    results_payload["raw_record_count"] = len(all_permits)
     print(f"\n合計原始資料: {len(all_permits)} 筆")
 
-    # ── 篩選 ──
+    if not all_permits:
+        print("無任何原始資料。Exiting successfully.")
+        results_payload["status"] = "no_source_records"
+        results_payload["finished_at"] = datetime.now(timezone.utc).isoformat()
+        write_results(results_path, results_payload)
+        return 0
+
     filtered = [
-        p for p in all_permits
-        if permit_matches(p, start_date, end_date, min_cost, target_usages)
+        permit
+        for permit in all_permits
+        if permit_matches(permit, start_date, end_date, min_cost, target_usages)
     ]
-    filtered.sort(key=lambda p: int(p["construction_cost"]), reverse=True)
+    filtered.sort(key=lambda permit: int(permit["construction_cost"]), reverse=True)
+    results_payload["matched_record_count"] = len(filtered)
 
     if not filtered:
         print("篩選後無符合資料。Exiting successfully.")
+        results_payload["status"] = "no_matching_permits"
+        results_payload["finished_at"] = datetime.now(timezone.utc).isoformat()
+        write_results(results_path, results_payload)
         return 0
 
     print(f"✓ 符合條件: {len(filtered)} 筆，處理前 {max_projects} 筆。\n")
 
-    # ── 處理 + 寫入 ──
+    selected_results: list[dict[str, Any]] = []
     for permit in filtered[:max_projects]:
         print(
             f"[{permit['source_tag']}] {permit['project_name']} | "
@@ -386,16 +515,27 @@ def main() -> int:
             f"{permit['site_address']}"
         )
 
+        result_permit = dict(permit)
         maps_data = None
         if google_key:
             query = f"{permit['site_address']} {permit['developer_name']}"
+            result_permit["google_maps_query"] = query
             maps_data = search_google_maps(query, google_key)
             if maps_data:
                 print(f"  Maps: {maps_data['name']} | {maps_data['formatted_address']}")
+                result_permit["google_maps_match"] = maps_data
+            else:
+                result_permit["google_maps_match"] = None
 
         if supabase_ready:
             upsert_to_supabase(supabase_url, supabase_key, permit, maps_data)
 
+        selected_results.append(result_permit)
+
+    results_payload["results"] = selected_results
+    results_payload["status"] = "completed"
+    results_payload["finished_at"] = datetime.now(timezone.utc).isoformat()
+    write_results(results_path, results_payload)
     print("\nCrawler completed successfully.")
     return 0
 

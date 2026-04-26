@@ -35,6 +35,7 @@ The current implementation:
 - filters by date range, minimum construction cost, and target usage keywords
 - prints the matching permits
 - optionally enriches each permit with Google Maps text search
+- writes a structured `results/results.json` output file
 
 ## Local Configuration
 
@@ -56,6 +57,10 @@ Example local run with Google Maps enabled:
 ```bash
 GOOGLE_MAPS_API_KEY=your-key python -m src.main
 ```
+
+After the run finishes, inspect:
+
+`results/results.json`
 
 ## GitHub Configuration
 
@@ -82,3 +87,5 @@ The workflow lives at `.github/workflows/weekly-crawl.yml` and runs:
 
 - every Monday at `00:00` UTC
 - whenever `workflow_dispatch` is triggered manually
+
+Each workflow run uploads `results/results.json` as an artifact named `weekly-crawl-results`.
