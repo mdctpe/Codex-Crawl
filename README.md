@@ -15,6 +15,9 @@ The crawler checks these variables when it starts:
 - `SUPABASE_SERVICE_KEY`
 - `GOOGLE_MAPS_API_KEY`
 - `NLMA_BMLIC_API_URL`
+- `NEW_TAIPEI_JSON_URL`
+- `NEW_TAIPEI_PAGE_SIZE`
+- `NEW_TAIPEI_MAX_PAGES`
 - `PERMIT_START_DATE`
 - `PERMIT_END_DATE`
 - `MIN_CONSTRUCTION_COST`
@@ -29,9 +32,13 @@ By default the crawler calls the official NLMA open data building permit endpoin
 
 `https://cloudbm.nlma.gov.tw/eweb/OpenData/OAS/EIX_RSAPI_V1/opendata/bmlic`
 
+It also fetches New Taipei City's official building permit open data:
+
+`https://data.ntpc.gov.tw/api/datasets/C1487D7B-FFF1-43D3-A2CE-4716EAB4D286/json`
+
 The current implementation:
 
-- fetches permit records from the government source
+- fetches permit records from NLMA, New Taipei City, and Taichung City
 - filters by date range, minimum construction cost, and target usage keywords
 - prints the matching permits
 - optionally enriches each permit with Google Maps text search
@@ -75,6 +82,9 @@ Secrets:
 Variables:
 
 - `NLMA_BMLIC_API_URL`
+- `NEW_TAIPEI_JSON_URL`
+- `NEW_TAIPEI_PAGE_SIZE`
+- `NEW_TAIPEI_MAX_PAGES`
 - `PERMIT_START_DATE`
 - `PERMIT_END_DATE`
 - `MIN_CONSTRUCTION_COST`

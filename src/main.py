@@ -14,12 +14,18 @@ DEFAULT_MAX_PROJECTS = 50
 DEFAULT_NLMA_BMLIC_API_URL = (
     "https://cloudbm.nlma.gov.tw/eweb/OpenData/OAS/EIX_RSAPI_V1/opendata/bmlic"
 )
+DEFAULT_NEW_TAIPEI_JSON_URL = (
+    "https://data.ntpc.gov.tw/api/datasets/"
+    "C1487D7B-FFF1-43D3-A2CE-4716EAB4D286/json"
+)
 TAICHUNG_JSON_URL = (
     "https://newdatacenter.taichung.gov.tw/api/v1/no-auth/resource.download"
     "?rid=0bf1850e-4295-433a-8ebc-9cdf9192eac5"
 )
 REQUEST_TIMEOUT_SECONDS = 45
 DEFAULT_RESULTS_PATH = "results/results.json"
+DEFAULT_NEW_TAIPEI_PAGE_SIZE = 200
+DEFAULT_NEW_TAIPEI_MAX_PAGES = 3
 
 
 def load_environment() -> None:
@@ -226,6 +232,127 @@ def normalize_nlma_permit(record: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def fetch_new_taipei_records(
+    api_url: str,
+    page_size: int,
+    max_pages: int,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    print(f"[新北市] 抓取中: {api_url}")
+    records: list[dict[str, Any]] = []
+    pages_fetched = 0
+    safe_page_size = max(page_size, 1)
+    safe_max_pages = max(max_pages, 1)
+
+    for page in range(safe_max_pages):
+        params = {"page": page, "size": safe_page_size}
+        try:
+            response = requests.get(
+                api_url,
+                params=params,
+                headers={"Accept": "application/json"},
+                timeout=REQUEST_TIMEOUT_SECONDS,
+            )
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            print(f"[新北市] 第 {page} 頁抓取失敗: {exc}")
+            return records, {
+                "status": "request_error",
+                "error": str(exc),
+                "page": page,
+                "pages_fetched": pages_fetched,
+                "record_count": len(records),
+                "request_params": params,
+            }
+
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            print(f"[新北市] 第 {page} 頁回傳不是 JSON: {exc}")
+            return records, {
+                "status": "invalid_json",
+                "error": str(exc),
+                "page": page,
+                "pages_fetched": pages_fetched,
+                "record_count": len(records),
+                "http_status": response.status_code,
+                "content_type": response.headers.get("content-type", ""),
+                "body_preview": response.text[:500],
+                "request_params": params,
+            }
+
+        if isinstance(payload, list):
+            page_records = payload
+        elif isinstance(payload, dict):
+            for key in ("data", "records", "rows", "results"):
+                candidate = payload.get(key)
+                if isinstance(candidate, list):
+                    page_records = candidate
+                    break
+            else:
+                page_records = []
+        else:
+            page_records = []
+
+        normalized_page_records = [
+            record for record in page_records if isinstance(record, dict)
+        ]
+        records.extend(normalized_page_records)
+        pages_fetched += 1
+        print(f"[新北市] 第 {page} 頁取得 {len(normalized_page_records)} 筆")
+
+        if len(normalized_page_records) < safe_page_size:
+            break
+
+    print(f"[新北市] 合計 {len(records)} 筆原始資料")
+    return records, {
+        "status": "ok",
+        "record_count": len(records),
+        "pages_fetched": pages_fetched,
+        "page_size": safe_page_size,
+        "max_pages": safe_max_pages,
+    }
+
+
+def normalize_new_taipei_permit(record: dict[str, Any]) -> dict[str, Any]:
+    site_address = str(
+        record.get("house_address")
+        or record.get("building_site")
+        or record.get("address")
+        or ""
+    ).strip() or "地址待補齊"
+
+    usage = str(
+        record.get("use_of_buildings") or record.get("building_use") or ""
+    ).strip()
+    permit_number = str(record.get("license_number") or "unknown").strip()
+
+    return {
+        "permit_number": permit_number,
+        "project_name": str(
+            record.get("project_name")
+            or record.get("building_site")
+            or record.get("house_address")
+            or permit_number
+        ).strip(),
+        "developer_name": str(
+            record.get("proprietor") or record.get("applicant") or "待補"
+        ).strip(),
+        "architect_name": str(
+            record.get("designer") or record.get("supervisor") or ""
+        ).strip(),
+        "site_address": site_address,
+        "construction_cost": parse_number(record.get("project_cost") or 0),
+        "permit_issued_at": normalize_date(
+            record.get("date_licensing") or record.get("date_the_permit")
+        ),
+        "usage": usage,
+        "region": "新北市",
+        "source_tag": "新北市",
+        "constructor_name": str(record.get("constructor") or "").strip(),
+        "land_use_zoning": str(record.get("land_use_zoning") or "").strip(),
+    }
+
+
 def fetch_taichung_records() -> tuple[list[dict[str, Any]], dict[str, Any]]:
     print(f"[台中市] 抓取中: {TAICHUNG_JSON_URL}")
     try:
@@ -428,6 +555,13 @@ def main() -> int:
     target_usages = parse_list_env("TARGET_USAGES", DEFAULT_TARGET_USAGES)
     google_key = os.getenv("GOOGLE_MAPS_API_KEY", "").strip()
     nlma_url = get_env("NLMA_BMLIC_API_URL", DEFAULT_NLMA_BMLIC_API_URL)
+    new_taipei_url = get_env("NEW_TAIPEI_JSON_URL", DEFAULT_NEW_TAIPEI_JSON_URL)
+    new_taipei_page_size = parse_int_env(
+        "NEW_TAIPEI_PAGE_SIZE", DEFAULT_NEW_TAIPEI_PAGE_SIZE
+    )
+    new_taipei_max_pages = parse_int_env(
+        "NEW_TAIPEI_MAX_PAGES", DEFAULT_NEW_TAIPEI_MAX_PAGES
+    )
 
     results_payload: dict[str, Any] = {
         "started_at": started_at,
@@ -436,6 +570,12 @@ def main() -> int:
         "results_path": results_path,
         "sources": {
             "nlma": {"url": nlma_url, "fetch": {}},
+            "new_taipei": {
+                "url": new_taipei_url,
+                "page_size": new_taipei_page_size,
+                "max_pages": new_taipei_max_pages,
+                "fetch": {},
+            },
             "taichung": {"url": TAICHUNG_JSON_URL, "fetch": {}},
         },
         "filters": {
@@ -474,6 +614,14 @@ def main() -> int:
     nlma_raw, nlma_meta = fetch_nlma_records(nlma_url, start_date, end_date)
     results_payload["sources"]["nlma"]["fetch"] = nlma_meta
     all_permits += [normalize_nlma_permit(record) for record in nlma_raw]
+
+    new_taipei_raw, new_taipei_meta = fetch_new_taipei_records(
+        new_taipei_url,
+        new_taipei_page_size,
+        new_taipei_max_pages,
+    )
+    results_payload["sources"]["new_taipei"]["fetch"] = new_taipei_meta
+    all_permits += [normalize_new_taipei_permit(record) for record in new_taipei_raw]
 
     taichung_raw, taichung_meta = fetch_taichung_records()
     results_payload["sources"]["taichung"]["fetch"] = taichung_meta
