@@ -1,17 +1,21 @@
 from __future__ import annotations
 
+import csv
+import hashlib
 import json
 import os
+import re
 from datetime import date, datetime, timezone
 from html import escape
 from pathlib import Path
 from typing import Any
+import xml.etree.ElementTree as ET
 
 import requests
 
 DEFAULT_TARGET_USAGES: tuple[str, ...] = ()
 DEFAULT_MIN_CONSTRUCTION_COST = 0
-DEFAULT_MAX_PROJECTS = 50
+DEFAULT_MAX_PROJECTS = 200
 DEFAULT_NLMA_BMLIC_API_URL = (
     "https://cloudbm.nlma.gov.tw/eweb/OpenData/OAS/EIX_RSAPI_V1/opendata/bmlic"
 )
@@ -27,6 +31,14 @@ DEFAULT_NEW_TAIPEI_JSON_URL = (
     "https://data.ntpc.gov.tw/api/datasets/"
     "C1487D7B-FFF1-43D3-A2CE-4716EAB4D286/json"
 )
+DEFAULT_TAIPEI_HISTORY_XML_URL = (
+    "https://data.taipei/api/frontstage/tpeod/dataset/"
+    "resource.download?rid=2d9396af-863b-496a-9893-0d2f2a8d8b71"
+)
+DEFAULT_TAIPEI_CURRENT_XML_URL = (
+    "https://data.taipei/api/frontstage/tpeod/dataset/"
+    "resource.download?rid=43624c8e-c768-4b3c-93c4-595f5af7a9cb"
+)
 TAICHUNG_JSON_URL = (
     "https://newdatacenter.taichung.gov.tw/api/v1/no-auth/resource.download"
     "?rid=0bf1850e-4295-433a-8ebc-9cdf9192eac5"
@@ -35,6 +47,15 @@ REQUEST_TIMEOUT_SECONDS = 45
 DEFAULT_RESULTS_PATH = "results/results.json"
 DEFAULT_NEW_TAIPEI_PAGE_SIZE = 200
 DEFAULT_NEW_TAIPEI_MAX_PAGES = 3
+TRACKER_STATUS_OPTIONS: tuple[str, ...] = (
+    "未處理",
+    "待分派",
+    "待聯絡",
+    "聯絡中",
+    "已回覆",
+    "已成交",
+    "已排除",
+)
 COMPANY_NAME_HINTS: tuple[str, ...] = (
     "公司",
     "有限",
@@ -107,6 +128,20 @@ def default_report_path(results_path: str) -> str:
     return str(Path(results_path).with_name("report.html"))
 
 
+def default_index_path(results_path: str) -> str:
+    return str(Path(results_path).with_name("index.html"))
+
+
+def default_tracker_path(results_path: str) -> str:
+    return str(Path(results_path).with_name("tracker.csv"))
+
+
+def dated_report_path(report_path: str, start_date: str, end_date: str) -> str:
+    start_year = start_date[:4] if len(start_date) >= 4 else "all"
+    end_year = end_date[:4] if len(end_date) >= 4 else "all"
+    return str(Path(report_path).with_name(f"report-{start_year}-{end_year}.html"))
+
+
 def format_count(value: Any) -> str:
     if isinstance(value, int):
         return f"{value:,}"
@@ -118,6 +153,22 @@ def format_money(value: Any) -> str:
     if amount <= 0:
         return "未提供"
     return f"NT$ {amount:,}"
+
+
+def html_attr(value: Any) -> str:
+    return escape(str(value), quote=True)
+
+
+def make_lead_id(result: dict[str, Any]) -> str:
+    parts = (
+        str(result.get("source_tag") or ""),
+        str(result.get("permit_number") or ""),
+        str(result.get("permit_issued_at") or ""),
+        str(result.get("developer_name") or ""),
+        str(result.get("site_address") or ""),
+    )
+    digest = hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()
+    return digest[:12]
 
 
 def render_source_card(name: str, data: dict[str, Any]) -> str:
@@ -154,6 +205,10 @@ def render_result_card(result: dict[str, Any]) -> str:
         ("發照日期", result.get("permit_issued_at") or "未提供"),
         ("執照字號", result.get("permit_number") or "未提供"),
     ]
+    if result.get("land_use_zoning"):
+        detail_rows.append(("使用分區", result.get("land_use_zoning") or "未提供"))
+    if result.get("constructor_name"):
+        detail_rows.append(("承造人", result.get("constructor_name") or "未提供"))
     details_html = "".join(
         f"<div class=\"detail-row\"><span>{escape(label)}</span><strong>{escape(str(value))}</strong></div>"
         for label, value in detail_rows
@@ -199,24 +254,77 @@ def render_result_card(result: dict[str, Any]) -> str:
         </div>
         """
 
+    tracking_status_options = "".join(
+        f"<option value=\"{html_attr(option)}\">{escape(option)}</option>"
+        for option in TRACKER_STATUS_OPTIONS
+    )
+    search_blob = " ".join(
+        str(value or "")
+        for value in (
+            result.get("project_name"),
+            result.get("developer_name"),
+            result.get("site_address"),
+            result.get("permit_number"),
+            result.get("usage"),
+            registry_match.get("matched_name") if isinstance(registry_match, dict) else "",
+            registry_match.get("business_accounting_no")
+            if isinstance(registry_match, dict)
+            else "",
+        )
+    ).lower()
+    lead_id = str(result.get("lead_id") or make_lead_id(result))
+
     return f"""
-    <article class="result-card">
+    <article
+      class="result-card"
+      data-lead-id="{html_attr(lead_id)}"
+      data-source="{html_attr(result.get('source_tag') or '未知來源')}"
+      data-search="{html_attr(search_blob)}"
+      data-default-status="未處理"
+    >
       <div class="card-top">
         <span class="source-pill">{escape(str(result.get('source_tag') or '未知來源'))}</span>
         <span class="budget-pill">{escape(format_money(result.get('construction_cost')))}</span>
       </div>
       <h2>{escape(str(result.get('project_name') or '未命名建案'))}</h2>
+      <div class="lead-meta">Lead ID：{escape(lead_id)}</div>
       <div class="details-grid">{details_html}</div>
       {registry_html}
       {maps_html}
+      <div class="subsection tracking-box">
+        <div class="subsection-head">
+          <h3>追蹤欄位</h3>
+          <span class="tracking-pill js-tracking-pill">未處理</span>
+        </div>
+        <div class="tracking-grid">
+          <label class="field">
+            <span>狀態</span>
+            <select class="js-track-status">
+              <option value="">未處理</option>
+              {tracking_status_options}
+            </select>
+          </label>
+          <label class="field">
+            <span>負責人</span>
+            <input class="js-track-owner" type="text" placeholder="例如 Mandy">
+          </label>
+          <label class="field">
+            <span>下次跟進</span>
+            <input class="js-track-next-date" type="date">
+          </label>
+        </div>
+        <label class="field">
+          <span>備註</span>
+          <textarea class="js-track-note" rows="3" placeholder="記錄聯絡窗口、需求、下一步"></textarea>
+        </label>
+        <p class="tracking-help">這些欄位會先存在你目前這台裝置的瀏覽器。若要多人共用，請下載 tracker.csv 丟到 Google Sheets 或之後再接共享資料庫。</p>
+      </div>
     </article>
     """
 
 
-def write_report(report_path: str, payload: dict[str, Any]) -> None:
-    output_path = Path(report_path)
+def write_report_html(output_path: Path, payload: dict[str, Any]) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
-
     sources = payload.get("sources", {})
     source_cards = "".join(
         render_source_card(str(name), data)
@@ -224,6 +332,7 @@ def write_report(report_path: str, payload: dict[str, Any]) -> None:
         if isinstance(data, dict)
     )
     results = payload.get("results", [])
+    result_count = len([result for result in results if isinstance(result, dict)])
     result_cards = "".join(
         render_result_card(result)
         for result in results
@@ -232,6 +341,16 @@ def write_report(report_path: str, payload: dict[str, Any]) -> None:
 
     status = str(payload.get("status") or "unknown")
     filters = payload.get("filters", {})
+    source_options = "".join(
+        f"<option value=\"{html_attr(result.get('source_tag') or '')}\">{escape(str(result.get('source_tag') or '未知來源'))}</option>"
+        for result in {
+            str(item.get("source_tag") or ""): item
+            for item in results
+            if isinstance(item, dict)
+        }.values()
+    )
+    tracker_download_name = Path(str(payload.get("tracker_path") or "tracker.csv")).name
+    report_data_json = json.dumps(results, ensure_ascii=False).replace("</", "<\\/")
     report_html = f"""<!doctype html>
 <html lang="zh-Hant">
 <head>
@@ -310,6 +429,16 @@ def write_report(report_path: str, payload: dict[str, Any]) -> None:
       display: grid;
       gap: 16px;
     }}
+    .toolbar, .toolbar-actions, .toolbar-filters {{
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      align-items: center;
+    }}
+    .toolbar {{
+      margin-top: 20px;
+      justify-content: space-between;
+    }}
     .summary-grid {{
       grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
       margin-top: 24px;
@@ -377,12 +506,57 @@ def write_report(report_path: str, payload: dict[str, Any]) -> None:
       gap: 12px;
       margin-top: 12px;
     }}
+    .toolbar input[type="search"],
+    .toolbar select,
+    .toolbar input[type="text"],
+    .toolbar input[type="date"],
+    .toolbar textarea {{
+      width: 100%;
+      border: 1px solid rgba(31,42,31,0.12);
+      background: rgba(255,255,255,0.92);
+      color: var(--ink);
+      border-radius: 14px;
+      padding: 12px 14px;
+      font: inherit;
+    }}
+    .toolbar input[type="search"] {{
+      min-width: min(320px, 100%);
+    }}
+    .toolbar select {{
+      min-width: 160px;
+    }}
+    .ghost-button {{
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 46px;
+      border: 1px solid rgba(31,42,31,0.12);
+      border-radius: 14px;
+      padding: 0 16px;
+      text-decoration: none;
+      font: inherit;
+      color: var(--ink);
+      background: rgba(255,255,255,0.82);
+      cursor: pointer;
+    }}
+    .ghost-button:hover {{
+      background: rgba(255,255,255,0.96);
+    }}
     .filter-chip {{
       padding: 12px 14px;
       border-radius: 16px;
       background: rgba(83,98,74,0.08);
       color: var(--olive);
       font-size: 14px;
+    }}
+    .note-panel {{
+      margin-top: 18px;
+      padding: 16px 18px;
+      border-radius: 18px;
+      background: rgba(200,107,41,0.08);
+      color: var(--ink);
+      line-height: 1.6;
+      border: 1px solid rgba(200,107,41,0.14);
     }}
     .results-grid {{
       grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
@@ -420,6 +594,12 @@ def write_report(report_path: str, payload: dict[str, Any]) -> None:
       font-size: 24px;
       line-height: 1.15;
     }}
+    .lead-meta {{
+      color: var(--muted);
+      font-size: 12px;
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+    }}
     .details-grid {{
       display: grid;
       gap: 10px;
@@ -450,8 +630,56 @@ def write_report(report_path: str, payload: dict[str, Any]) -> None:
       margin: 0 0 10px;
       font-size: 15px;
     }}
+    .subsection-head {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 10px;
+    }}
     .subsection.muted {{
       color: var(--muted);
+    }}
+    .tracking-box {{
+      background: rgba(200,107,41,0.06);
+    }}
+    .tracking-grid {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 12px;
+      margin-bottom: 12px;
+    }}
+    .field {{
+      display: grid;
+      gap: 6px;
+      font-size: 13px;
+      color: var(--muted);
+    }}
+    .field span {{
+      font-weight: 600;
+    }}
+    .tracking-pill {{
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      padding: 6px 10px;
+      background: rgba(83,98,74,0.12);
+      color: var(--olive);
+      font-size: 12px;
+      font-weight: 700;
+    }}
+    .tracking-help {{
+      margin: 10px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.6;
+    }}
+    .utility-line {{
+      color: var(--muted);
+      font-size: 14px;
+    }}
+    .hidden {{
+      display: none !important;
     }}
     .business-items .label {{
       margin-top: 12px;
@@ -491,6 +719,9 @@ def write_report(report_path: str, payload: dict[str, Any]) -> None:
       .detail-row strong {{
         text-align: left;
       }}
+      .toolbar {{
+        align-items: stretch;
+      }}
     }}
   </style>
 </head>
@@ -505,6 +736,33 @@ def write_report(report_path: str, payload: dict[str, Any]) -> None:
         <div class="summary-card"><div class="label">原始資料</div><strong>{escape(format_count(payload.get('raw_record_count', 0)))}</strong></div>
         <div class="summary-card"><div class="label">符合條件</div><strong>{escape(format_count(payload.get('matched_record_count', 0)))}</strong></div>
         <div class="summary-card"><div class="label">GCIS 匹配</div><strong>{escape(format_count((payload.get('gcis_company_registry') or {}).get('matches_found', 0)))}</strong></div>
+      </div>
+      <div class="toolbar">
+        <div class="toolbar-filters">
+          <input id="searchInput" type="search" placeholder="搜尋建案、起造人、地址、統編">
+          <select id="sourceFilter">
+            <option value="">全部來源</option>
+            {source_options}
+          </select>
+          <select id="trackingFilter">
+            <option value="">全部追蹤狀態</option>
+            <option value="未處理">未處理</option>
+            <option value="待分派">待分派</option>
+            <option value="待聯絡">待聯絡</option>
+            <option value="聯絡中">聯絡中</option>
+            <option value="已回覆">已回覆</option>
+            <option value="已成交">已成交</option>
+            <option value="已排除">已排除</option>
+          </select>
+        </div>
+        <div class="toolbar-actions">
+          <a class="ghost-button" href="./{html_attr(tracker_download_name)}" download>下載 tracker.csv</a>
+          <button class="ghost-button" id="exportTrackingJson" type="button">匯出我的追蹤 JSON</button>
+          <button class="ghost-button" id="exportTrackingCsv" type="button">匯出含追蹤 CSV</button>
+        </div>
+      </div>
+      <div class="note-panel">
+        這份頁面適合拿來分享給團隊看名單；若今天就要多人共用追蹤紀錄，最實用的做法是下載 <strong>tracker.csv</strong> 丟到 Google Sheets。頁面上的追蹤欄位也能先幫每位同事保留自己的進度。
       </div>
     </section>
 
@@ -537,6 +795,7 @@ def write_report(report_path: str, payload: dict[str, Any]) -> None:
         <h2>名單結果</h2>
         <p>優先顯示已符合篩選條件的案件，GCIS 與 Google Maps 會在可用時補強。</p>
       </div>
+      <div class="utility-line">目前顯示 <strong id="visibleCount">{escape(format_count(result_count))}</strong> / {escape(format_count(result_count))} 筆</div>
     </div>
     <section class="results-grid">{result_cards}</section>
 
@@ -544,6 +803,171 @@ def write_report(report_path: str, payload: dict[str, Any]) -> None:
       產出時間：{escape(str(payload.get('finished_at') or payload.get('started_at') or '未提供'))}
     </footer>
   </div>
+  <script id="reportData" type="application/json">{report_data_json}</script>
+  <script>
+    const TRACKING_PREFIX = "crawler-tracking:";
+    const reportData = JSON.parse(document.getElementById("reportData").textContent || "[]");
+    const cards = Array.from(document.querySelectorAll(".result-card"));
+    const searchInput = document.getElementById("searchInput");
+    const sourceFilter = document.getElementById("sourceFilter");
+    const trackingFilter = document.getElementById("trackingFilter");
+    const visibleCount = document.getElementById("visibleCount");
+
+    function trackingKey(leadId) {{
+      return TRACKING_PREFIX + leadId;
+    }}
+
+    function normalizeTracking(card) {{
+      const leadId = card.dataset.leadId;
+      let saved = {{}};
+      try {{
+        saved = JSON.parse(localStorage.getItem(trackingKey(leadId)) || "{{}}");
+      }} catch (error) {{
+        saved = {{}};
+      }}
+      const status = saved.status || card.dataset.defaultStatus || "未處理";
+      const owner = saved.owner || "";
+      const nextDate = saved.nextDate || "";
+      const note = saved.note || "";
+
+      card.querySelector(".js-track-status").value = status === "未處理" ? "" : status;
+      card.querySelector(".js-track-owner").value = owner;
+      card.querySelector(".js-track-next-date").value = nextDate;
+      card.querySelector(".js-track-note").value = note;
+      card.querySelector(".js-tracking-pill").textContent = status;
+      card.dataset.trackingStatus = status;
+      card.dataset.trackingOwner = owner.toLowerCase();
+    }}
+
+    function persistTracking(card) {{
+      const leadId = card.dataset.leadId;
+      const payload = {{
+        status: card.querySelector(".js-track-status").value || "未處理",
+        owner: card.querySelector(".js-track-owner").value.trim(),
+        nextDate: card.querySelector(".js-track-next-date").value,
+        note: card.querySelector(".js-track-note").value.trim()
+      }};
+      localStorage.setItem(trackingKey(leadId), JSON.stringify(payload));
+      card.querySelector(".js-tracking-pill").textContent = payload.status;
+      card.dataset.trackingStatus = payload.status;
+      card.dataset.trackingOwner = payload.owner.toLowerCase();
+      applyFilters();
+    }}
+
+    function applyFilters() {{
+      const keyword = (searchInput.value || "").trim().toLowerCase();
+      const source = sourceFilter.value;
+      const trackingStatus = trackingFilter.value;
+      let shown = 0;
+
+      cards.forEach((card) => {{
+        const matchesKeyword = !keyword || (card.dataset.search || "").includes(keyword) || (card.dataset.trackingOwner || "").includes(keyword);
+        const matchesSource = !source || card.dataset.source === source;
+        const matchesTracking = !trackingStatus || (card.dataset.trackingStatus || "未處理") === trackingStatus;
+        const shouldShow = matchesKeyword && matchesSource && matchesTracking;
+        card.classList.toggle("hidden", !shouldShow);
+        if (shouldShow) {{
+          shown += 1;
+        }}
+      }});
+
+      visibleCount.textContent = shown.toLocaleString("zh-Hant-TW");
+    }}
+
+    function csvEscape(value) {{
+      const text = String(value ?? "");
+      if (/[",\\n]/.test(text)) {{
+        return '"' + text.replace(/"/g, '""') + '"';
+      }}
+      return text;
+    }}
+
+    function readTracking(leadId) {{
+      try {{
+        return JSON.parse(localStorage.getItem(trackingKey(leadId)) || "{{}}");
+      }} catch (error) {{
+        return {{}};
+      }}
+    }}
+
+    function downloadBlob(content, fileName, type) {{
+      const blob = new Blob([content], {{ type }});
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = fileName;
+      link.click();
+      URL.revokeObjectURL(url);
+    }}
+
+    document.getElementById("exportTrackingJson").addEventListener("click", () => {{
+      const payload = reportData.map((item) => {{
+        const leadId = item.lead_id || "";
+        return {{
+          lead_id: leadId,
+          project_name: item.project_name || "",
+          developer_name: item.developer_name || "",
+          source_tag: item.source_tag || "",
+          permit_number: item.permit_number || "",
+          tracking: readTracking(leadId)
+        }};
+      }});
+      downloadBlob(JSON.stringify(payload, null, 2), "tracking-export.json", "application/json");
+    }});
+
+    document.getElementById("exportTrackingCsv").addEventListener("click", () => {{
+      const header = [
+        "lead_id",
+        "source_tag",
+        "project_name",
+        "developer_name",
+        "site_address",
+        "permit_number",
+        "permit_issued_at",
+        "construction_cost",
+        "usage",
+        "tracking_status",
+        "owner",
+        "next_action_date",
+        "note"
+      ];
+      const rows = [header.join(",")];
+      reportData.forEach((item) => {{
+        const tracking = readTracking(item.lead_id || "");
+        rows.push([
+          item.lead_id || "",
+          item.source_tag || "",
+          item.project_name || "",
+          item.developer_name || "",
+          item.site_address || "",
+          item.permit_number || "",
+          item.permit_issued_at || "",
+          item.construction_cost || "",
+          item.usage || "",
+          tracking.status || "未處理",
+          tracking.owner || "",
+          tracking.nextDate || "",
+          tracking.note || ""
+        ].map(csvEscape).join(","));
+      }});
+      downloadBlob("\\ufeff" + rows.join("\\n"), "tracking-export.csv", "text/csv;charset=utf-8");
+    }});
+
+    cards.forEach((card) => {{
+      normalizeTracking(card);
+      card.querySelectorAll(".js-track-status, .js-track-owner, .js-track-next-date, .js-track-note").forEach((field) => {{
+        field.addEventListener("change", () => persistTracking(card));
+        field.addEventListener("input", () => persistTracking(card));
+      }});
+    }});
+
+    [searchInput, sourceFilter, trackingFilter].forEach((field) => {{
+      field.addEventListener("input", applyFilters);
+      field.addEventListener("change", applyFilters);
+    }});
+
+    applyFilters();
+  </script>
 </body>
 </html>
 """
@@ -551,9 +975,85 @@ def write_report(report_path: str, payload: dict[str, Any]) -> None:
     print(f"Wrote crawler report to: {output_path}")
 
 
+def write_report(report_path: str, payload: dict[str, Any]) -> None:
+    write_report_html(Path(report_path), payload)
+    index_path = str(payload.get("index_path") or "")
+    if index_path:
+        write_report_html(Path(index_path), payload)
+    alias_path = str(payload.get("report_alias_path") or "")
+    if alias_path:
+        write_report_html(Path(alias_path), payload)
+
+
+def write_tracker_csv(tracker_path: str, payload: dict[str, Any]) -> None:
+    output_path = Path(tracker_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = [
+        "lead_id",
+        "source_tag",
+        "region",
+        "project_name",
+        "developer_name",
+        "architect_name",
+        "site_address",
+        "permit_number",
+        "permit_issued_at",
+        "construction_cost",
+        "usage",
+        "gcis_company_name",
+        "gcis_business_no",
+        "tracking_status",
+        "owner",
+        "next_action_date",
+        "note",
+    ]
+    with output_path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for result in payload.get("results", []):
+            if not isinstance(result, dict):
+                continue
+            registry_match = (
+                result.get("gcis_company_registry", {}).get("match")
+                if isinstance(result.get("gcis_company_registry"), dict)
+                else None
+            )
+            writer.writerow(
+                {
+                    "lead_id": result.get("lead_id") or "",
+                    "source_tag": result.get("source_tag") or "",
+                    "region": result.get("region") or "",
+                    "project_name": result.get("project_name") or "",
+                    "developer_name": result.get("developer_name") or "",
+                    "architect_name": result.get("architect_name") or "",
+                    "site_address": result.get("site_address") or "",
+                    "permit_number": result.get("permit_number") or "",
+                    "permit_issued_at": result.get("permit_issued_at") or "",
+                    "construction_cost": result.get("construction_cost") or 0,
+                    "usage": result.get("usage") or "",
+                    "gcis_company_name": (
+                        registry_match.get("matched_name") if isinstance(registry_match, dict) else ""
+                    ),
+                    "gcis_business_no": (
+                        registry_match.get("business_accounting_no")
+                        if isinstance(registry_match, dict)
+                        else ""
+                    ),
+                    "tracking_status": "未處理",
+                    "owner": "",
+                    "next_action_date": "",
+                    "note": "",
+                }
+            )
+    print(f"Wrote tracker CSV to: {output_path}")
+
+
 def write_outputs(results_path: str, report_path: str, payload: dict[str, Any]) -> None:
     write_results(results_path, payload)
     write_report(report_path, payload)
+    tracker_path = str(payload.get("tracker_path") or "")
+    if tracker_path:
+        write_tracker_csv(tracker_path, payload)
 
 
 def parse_number(value: Any) -> int:
@@ -873,6 +1373,186 @@ def normalize_new_taipei_permit(record: dict[str, Any]) -> dict[str, Any]:
         "source_tag": "新北市",
         "constructor_name": str(record.get("constructor") or "").strip(),
         "land_use_zoning": str(record.get("land_use_zoning") or "").strip(),
+    }
+
+
+def parse_taipei_xml_records(xml_text: str) -> list[dict[str, Any]]:
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError as exc:
+        raise ValueError(f"invalid_xml: {exc}") from exc
+
+    records: list[dict[str, Any]] = []
+    for data_node in root.findall(".//Data"):
+        record: dict[str, Any] = {}
+        for child in data_node:
+            tag = child.tag.strip()
+            if tag == "建築地點":
+                record[tag] = [
+                    (address.text or "").strip()
+                    for address in child.findall(".//地址")
+                    if (address.text or "").strip()
+                ]
+            elif tag == "地段地號":
+                record[tag] = [
+                    (land.text or "").strip()
+                    for land in child.findall(".//地段號")
+                    if (land.text or "").strip()
+                ]
+            elif tag == "建築概要":
+                record[tag] = [
+                    (floor.text or "").strip()
+                    for floor in child.findall(".//樓層")
+                    if (floor.text or "").strip()
+                ]
+            elif len(child):
+                record[tag] = [
+                    (nested.text or "").strip()
+                    for nested in child
+                    if (nested.text or "").strip()
+                ]
+            else:
+                record[tag] = (child.text or "").strip()
+        records.append(record)
+    return records
+
+
+def fetch_taipei_records(
+    history_url: str,
+    current_url: str,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    resources = [
+        ("history", history_url),
+        ("current", current_url),
+    ]
+    combined_records: list[dict[str, Any]] = []
+    resource_meta: list[dict[str, Any]] = []
+
+    for label, url in resources:
+        print(f"[台北市] 抓取 {label}: {url}")
+        try:
+            response = requests.get(
+                url,
+                headers={"Accept": "application/xml,text/xml,*/*"},
+                timeout=REQUEST_TIMEOUT_SECONDS,
+            )
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            print(f"[台北市] {label} 抓取失敗: {exc}")
+            return combined_records, {
+                "status": "request_error",
+                "error": str(exc),
+                "resource": label,
+                "record_count": len(combined_records),
+                "resources": resource_meta,
+            }
+
+        xml_text = response.content.decode("utf-8-sig", errors="ignore")
+        try:
+            page_records = parse_taipei_xml_records(xml_text)
+        except ValueError as exc:
+            print(f"[台北市] {label} XML 解析失敗: {exc}")
+            return combined_records, {
+                "status": "invalid_xml",
+                "error": str(exc),
+                "resource": label,
+                "http_status": response.status_code,
+                "content_type": response.headers.get("content-type", ""),
+                "body_preview": xml_text[:500],
+                "record_count": len(combined_records),
+                "resources": resource_meta,
+            }
+
+        combined_records.extend(page_records)
+        resource_meta.append(
+            {
+                "name": label,
+                "url": url,
+                "status": "ok",
+                "record_count": len(page_records),
+            }
+        )
+        print(f"[台北市] {label} 取得 {len(page_records)} 筆")
+
+    print(f"[台北市] 合計 {len(combined_records)} 筆原始資料")
+    return combined_records, {
+        "status": "ok",
+        "record_count": len(combined_records),
+        "resources": resource_meta,
+    }
+
+
+def collapse_location_values(values: list[str], limit: int = 3) -> str:
+    unique_values: list[str] = []
+    for value in values:
+        cleaned = value.strip()
+        if cleaned and cleaned not in unique_values:
+            unique_values.append(cleaned)
+    if not unique_values:
+        return ""
+    if len(unique_values) <= limit:
+        return " / ".join(unique_values)
+    return f"{' / '.join(unique_values[:limit])} 等{len(unique_values)}處"
+
+
+def extract_taipei_usage(usage_lines: list[str]) -> str:
+    usages: list[str] = []
+    for line in usage_lines:
+        if "用途:" not in line:
+            continue
+        usage = line.split("用途:", 1)[1].strip()
+        usage = re.sub(r"[（(][^）)]*[）)]", "", usage)
+        parts = re.split(r"[、/；;,]", usage)
+        for part in parts:
+            cleaned = part.strip()
+            cleaned = re.sub(r"[0-9]+(?:\.[0-9]+)?", "", cleaned)
+            cleaned = cleaned.replace("㎡", "").replace("M", "").replace("m", "")
+            cleaned = cleaned.replace(":", "").replace("：", "")
+            cleaned = re.sub(r"\s+", "", cleaned)
+            cleaned = cleaned.strip("。．-")
+            cleaned = cleaned.split("依", 1)[0].strip() or cleaned
+            if len(cleaned) > 18:
+                cleaned = cleaned[:18]
+            if len(cleaned) < 2:
+                continue
+            if cleaned not in usages:
+                usages.append(cleaned)
+    return " / ".join(usages[:10])
+
+
+def normalize_taipei_permit(record: dict[str, Any]) -> dict[str, Any]:
+    site_addresses = record.get("建築地點")
+    if not isinstance(site_addresses, list):
+        site_addresses = []
+    land_numbers = record.get("地段地號")
+    if not isinstance(land_numbers, list):
+        land_numbers = []
+    usage_lines = record.get("建築概要")
+    if not isinstance(usage_lines, list):
+        usage_lines = []
+
+    site_address = collapse_location_values(site_addresses)
+    if not site_address and land_numbers:
+        site_address = collapse_location_values(land_numbers, limit=2)
+    site_address = site_address or "地址待補齊"
+
+    usage = extract_taipei_usage(usage_lines)
+    permit_number = str(record.get("執照號碼") or "unknown").strip()
+    project_name = site_address if site_address != "地址待補齊" else permit_number
+
+    return {
+        "permit_number": permit_number,
+        "project_name": project_name,
+        "developer_name": str(record.get("起造人") or "待補").strip(),
+        "architect_name": str(record.get("設計人") or "").strip(),
+        "site_address": site_address,
+        "construction_cost": parse_number(record.get("工程金額") or 0),
+        "permit_issued_at": normalize_date(record.get("發照日期") or ""),
+        "usage": usage,
+        "region": "台北市",
+        "source_tag": "台北市",
+        "land_use_zoning": str(record.get("使用分區") or "").strip(),
+        "constructor_name": str(record.get("監造人") or "").strip(),
     }
 
 
@@ -1290,6 +1970,8 @@ def main() -> int:
     load_environment()
     results_path = get_env("RESULTS_PATH", DEFAULT_RESULTS_PATH)
     report_path = get_env("REPORT_PATH", default_report_path(results_path))
+    index_path = get_env("INDEX_PATH", default_index_path(results_path))
+    tracker_path = get_env("TRACKER_PATH", default_tracker_path(results_path))
 
     supabase_url = os.getenv("SUPABASE_URL", "").strip()
     supabase_key = os.getenv("SUPABASE_SERVICE_KEY", "").strip()
@@ -1323,6 +2005,15 @@ def main() -> int:
     new_taipei_max_pages = parse_int_env(
         "NEW_TAIPEI_MAX_PAGES", DEFAULT_NEW_TAIPEI_MAX_PAGES
     )
+    taipei_history_url = get_env(
+        "TAIPEI_HISTORY_XML_URL",
+        DEFAULT_TAIPEI_HISTORY_XML_URL,
+    )
+    taipei_current_url = get_env(
+        "TAIPEI_CURRENT_XML_URL",
+        DEFAULT_TAIPEI_CURRENT_XML_URL,
+    )
+    report_alias_path = dated_report_path(report_path, start_date, end_date)
 
     results_payload: dict[str, Any] = {
         "started_at": started_at,
@@ -1330,12 +2021,20 @@ def main() -> int:
         "status": "running",
         "results_path": results_path,
         "report_path": report_path,
+        "index_path": index_path,
+        "tracker_path": tracker_path,
+        "report_alias_path": report_alias_path,
         "sources": {
             "nlma": {"url": nlma_url, "fetch": {}},
             "new_taipei": {
                 "url": new_taipei_url,
                 "page_size": new_taipei_page_size,
                 "max_pages": new_taipei_max_pages,
+                "fetch": {},
+            },
+            "taipei": {
+                "history_url": taipei_history_url,
+                "current_url": taipei_current_url,
                 "fetch": {},
             },
             "taichung": {"url": TAICHUNG_JSON_URL, "fetch": {}},
@@ -1394,6 +2093,13 @@ def main() -> int:
     )
     results_payload["sources"]["new_taipei"]["fetch"] = new_taipei_meta
     all_permits += [normalize_new_taipei_permit(record) for record in new_taipei_raw]
+
+    taipei_raw, taipei_meta = fetch_taipei_records(
+        taipei_history_url,
+        taipei_current_url,
+    )
+    results_payload["sources"]["taipei"]["fetch"] = taipei_meta
+    all_permits += [normalize_taipei_permit(record) for record in taipei_raw]
 
     taichung_raw, taichung_meta = fetch_taichung_records()
     results_payload["sources"]["taichung"]["fetch"] = taichung_meta
@@ -1477,6 +2183,9 @@ def main() -> int:
             )
 
         selected_results.append(result_permit)
+
+    for result in selected_results:
+        result["lead_id"] = make_lead_id(result)
 
     results_payload["results"] = selected_results
     results_payload["status"] = "completed"

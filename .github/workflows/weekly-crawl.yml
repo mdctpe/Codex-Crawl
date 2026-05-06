@@ -5,13 +5,25 @@ on:
   schedule:
     - cron: "0 0 * * 1"
 
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "github-pages"
+  cancel-in-progress: true
+
 jobs:
   crawl:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -32,6 +44,11 @@ jobs:
           GCIS_COMPANY_LOOKUP_ENABLED: ${{ vars.GCIS_COMPANY_LOOKUP_ENABLED }}
           GCIS_COMPANY_KEYWORD_API_URL: ${{ vars.GCIS_COMPANY_KEYWORD_API_URL }}
           GCIS_COMPANY_DETAILS_API_URL: ${{ vars.GCIS_COMPANY_DETAILS_API_URL }}
+          NEW_TAIPEI_JSON_URL: ${{ vars.NEW_TAIPEI_JSON_URL }}
+          NEW_TAIPEI_PAGE_SIZE: ${{ vars.NEW_TAIPEI_PAGE_SIZE }}
+          NEW_TAIPEI_MAX_PAGES: ${{ vars.NEW_TAIPEI_MAX_PAGES }}
+          TAIPEI_HISTORY_XML_URL: ${{ vars.TAIPEI_HISTORY_XML_URL }}
+          TAIPEI_CURRENT_XML_URL: ${{ vars.TAIPEI_CURRENT_XML_URL }}
           PERMIT_START_DATE: ${{ vars.PERMIT_START_DATE }}
           PERMIT_END_DATE: ${{ vars.PERMIT_END_DATE }}
           MIN_CONSTRUCTION_COST: ${{ vars.MIN_CONSTRUCTION_COST }}
@@ -39,6 +56,8 @@ jobs:
           TARGET_USAGES: ${{ vars.TARGET_USAGES }}
           RESULTS_PATH: results/results.json
           REPORT_PATH: results/report.html
+          INDEX_PATH: results/index.html
+          TRACKER_PATH: results/tracker.csv
         run: python -m src.main
 
       - name: Upload crawler results
@@ -48,3 +67,21 @@ jobs:
           name: weekly-crawl-results
           path: results/
           if-no-files-found: error
+
+      - name: Upload GitHub Pages artifact
+        if: success()
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: results/
+
+  deploy:
+    if: needs.crawl.result == 'success'
+    needs: crawl
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

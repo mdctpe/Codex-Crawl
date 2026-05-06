@@ -21,14 +21,18 @@ The crawler checks these variables when it starts:
 - `NEW_TAIPEI_JSON_URL`
 - `NEW_TAIPEI_PAGE_SIZE`
 - `NEW_TAIPEI_MAX_PAGES`
+- `TAIPEI_HISTORY_XML_URL`
+- `TAIPEI_CURRENT_XML_URL`
 - `PERMIT_START_DATE`
 - `PERMIT_END_DATE`
 - `MIN_CONSTRUCTION_COST`
 - `MAX_PROJECTS`
 - `TARGET_USAGES`
 - `REPORT_PATH`
+- `INDEX_PATH`
+- `TRACKER_PATH`
 
-If the Supabase secrets are missing, the script prints a clear message and continues because the scaffold does not write to Supabase yet.
+If the Supabase secrets are missing, the script prints a clear message and continues. If they are present, matching permits can also be upserted into the `leads` table.
 
 If `GOOGLE_MAPS_API_KEY` is missing, the script skips the Google Maps enrichment step and still exits successfully.
 
@@ -40,6 +44,11 @@ It also fetches New Taipei City's official building permit open data:
 
 `https://data.ntpc.gov.tw/api/datasets/C1487D7B-FFF1-43D3-A2CE-4716EAB4D286/json`
 
+It also fetches Taipei City's official building permit summary XML resources:
+
+- `https://data.taipei/api/frontstage/tpeod/dataset/resource.download?rid=2d9396af-863b-496a-9893-0d2f2a8d8b71`
+- `https://data.taipei/api/frontstage/tpeod/dataset/resource.download?rid=43624c8e-c768-4b3c-93c4-595f5af7a9cb`
+
 For company normalization, the crawler can also enrich matched developers through the official GCIS company registry APIs:
 
 - `https://data.gcis.nat.gov.tw/od/data/api/6BBA2268-1367-4B42-9CCA-BC17499EBE8C`
@@ -47,13 +56,14 @@ For company normalization, the crawler can also enrich matched developers throug
 
 The current implementation:
 
-- fetches permit records from NLMA, New Taipei City, and Taichung City
+- fetches permit records from NLMA, New Taipei City, Taipei City, and Taichung City
 - filters by date range, minimum construction cost, and target usage keywords
 - optionally normalizes company names with GCIS and adds company registry details
 - prints the matching permits
 - optionally enriches each permit with Google Maps text search
 - writes a structured `results/results.json` output file
-- generates a human-friendly `results/report.html` page for the team
+- generates a human-friendly HTML report for the team
+- creates a share-ready `results/index.html` page and a `results/tracker.csv` file for Google Sheets or Excel follow-up
 
 ## Local Configuration
 
@@ -84,6 +94,14 @@ and
 
 `results/report.html`
 
+The shareable static page will also be written to:
+
+`results/index.html`
+
+The starter tracker file for teammates is:
+
+`results/tracker.csv`
+
 ## GitHub Configuration
 
 Add these in `Settings -> Secrets and variables -> Actions`:
@@ -103,6 +121,8 @@ Variables:
 - `NEW_TAIPEI_JSON_URL`
 - `NEW_TAIPEI_PAGE_SIZE`
 - `NEW_TAIPEI_MAX_PAGES`
+- `TAIPEI_HISTORY_XML_URL`
+- `TAIPEI_CURRENT_XML_URL`
 - `PERMIT_START_DATE`
 - `PERMIT_END_DATE`
 - `MIN_CONSTRUCTION_COST`
@@ -117,4 +137,6 @@ The workflow lives at `.github/workflows/weekly-crawl.yml` and runs:
 - whenever `workflow_dispatch` is triggered manually
 
 Each workflow run uploads `results/results.json` as an artifact named `weekly-crawl-results`.
-The artifact now includes the HTML report too.
+The artifact now includes the HTML report, shareable index page, and tracker CSV.
+
+The workflow also deploys the latest `results/` folder to GitHub Pages so teammates can open a stable URL after the branch is merged or the workflow is run from the publishing branch.
