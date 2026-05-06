@@ -14,6 +14,14 @@ DEFAULT_MAX_PROJECTS = 50
 DEFAULT_NLMA_BMLIC_API_URL = (
     "https://cloudbm.nlma.gov.tw/eweb/OpenData/OAS/EIX_RSAPI_V1/opendata/bmlic"
 )
+DEFAULT_GCIS_COMPANY_KEYWORD_API_URL = (
+    "https://data.gcis.nat.gov.tw/od/data/api/"
+    "6BBA2268-1367-4B42-9CCA-BC17499EBE8C"
+)
+DEFAULT_GCIS_COMPANY_DETAILS_API_URL = (
+    "https://data.gcis.nat.gov.tw/od/data/api/"
+    "236EE382-4942-41A9-BD03-CA0709025E7C"
+)
 DEFAULT_NEW_TAIPEI_JSON_URL = (
     "https://data.ntpc.gov.tw/api/datasets/"
     "C1487D7B-FFF1-43D3-A2CE-4716EAB4D286/json"
@@ -26,6 +34,21 @@ REQUEST_TIMEOUT_SECONDS = 45
 DEFAULT_RESULTS_PATH = "results/results.json"
 DEFAULT_NEW_TAIPEI_PAGE_SIZE = 200
 DEFAULT_NEW_TAIPEI_MAX_PAGES = 3
+COMPANY_NAME_HINTS: tuple[str, ...] = (
+    "公司",
+    "有限",
+    "股份",
+    "建設",
+    "營造",
+    "工程",
+    "開發",
+    "實業",
+    "企業",
+    "不動產",
+    "顧問",
+    "科技",
+    "工業",
+)
 
 
 def load_environment() -> None:
@@ -58,6 +81,17 @@ def parse_list_env(name: str, fallback: tuple[str, ...]) -> tuple[str, ...]:
     return values or fallback
 
 
+def parse_bool_env(name: str, fallback: bool) -> bool:
+    raw = os.getenv(name, "").strip().lower()
+    if not raw:
+        return fallback
+    if raw in {"1", "true", "yes", "y", "on"}:
+        return True
+    if raw in {"0", "false", "no", "n", "off"}:
+        return False
+    return fallback
+
+
 def write_results(results_path: str, payload: dict[str, Any]) -> None:
     output_path = Path(results_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -88,6 +122,11 @@ def normalize_date(value: Any) -> str:
     raw = str(value).strip()
     if not raw:
         return ""
+    if raw.isdigit() and len(raw) == 7:
+        try:
+            return date(int(raw[:3]) + 1911, int(raw[3:5]), int(raw[5:7])).isoformat()
+        except ValueError:
+            pass
     candidates = [raw, raw.split("T")[0], raw.split(" ")[0]]
     formats = ("%Y-%m-%d", "%Y/%m/%d", "%Y.%m.%d", "%Y%m%d")
     for candidate in candidates:
@@ -107,6 +146,34 @@ def normalize_date(value: Any) -> str:
                 except ValueError:
                     continue
     return raw
+
+
+def clean_company_query(name: str) -> str:
+    candidate = name.strip()
+    if not candidate or candidate == "待補":
+        return ""
+    for separator in ("，", ",", "；", ";", "\n"):
+        candidate = candidate.split(separator, 1)[0].strip()
+    candidate = candidate.replace("（", "(").replace("）", ")")
+    return " ".join(candidate.split())
+
+
+def normalize_company_name_for_compare(name: str) -> str:
+    normalized = clean_company_query(name)
+    for token in ("股份有限公司", "有限公司", "公司", "股份", " "):
+        normalized = normalized.replace(token, "")
+    return normalized
+
+
+def should_lookup_gcis_company(name: str) -> bool:
+    query = clean_company_query(name)
+    if len(query) < 3:
+        return False
+    if any(hint in query for hint in COMPANY_NAME_HINTS):
+        return True
+    if "Ｏ" in query or "○" in query:
+        return False
+    return False
 
 
 def fetch_nlma_records(
@@ -353,6 +420,227 @@ def normalize_new_taipei_permit(record: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def search_gcis_company_candidates(
+    query: str,
+    keyword_api_url: str,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    params = {
+        "$format": "json",
+        "$top": "5",
+        "$filter": f"Company_Name like {query} and Company_Status eq 01",
+    }
+    try:
+        response = requests.get(
+            keyword_api_url,
+            params=params,
+            headers={"Accept": "application/json"},
+            timeout=REQUEST_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        return [], {"status": "request_error", "error": str(exc), "request_params": params}
+
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        if not response.text.strip():
+            return [], {
+                "status": "empty_response",
+                "http_status": response.status_code,
+                "request_params": params,
+            }
+        return [], {
+            "status": "invalid_json",
+            "error": str(exc),
+            "http_status": response.status_code,
+            "content_type": response.headers.get("content-type", ""),
+            "body_preview": response.text[:500],
+            "request_params": params,
+        }
+
+    if not isinstance(payload, list):
+        return [], {
+            "status": "unexpected_payload",
+            "http_status": response.status_code,
+            "request_params": params,
+        }
+    candidates = [item for item in payload if isinstance(item, dict)]
+    return candidates, {
+        "status": "ok",
+        "http_status": response.status_code,
+        "record_count": len(candidates),
+        "request_params": params,
+    }
+
+
+def score_gcis_candidate(query: str, candidate_name: str) -> tuple[int, int]:
+    normalized_query = normalize_company_name_for_compare(query)
+    normalized_candidate = normalize_company_name_for_compare(candidate_name)
+    if not normalized_query or not normalized_candidate:
+        return (0, 9999)
+    if normalized_candidate == normalized_query:
+        return (100, abs(len(candidate_name) - len(query)))
+    if candidate_name == query:
+        return (95, abs(len(candidate_name) - len(query)))
+    if normalized_query in normalized_candidate:
+        return (85, abs(len(candidate_name) - len(query)))
+    if normalized_candidate in normalized_query:
+        return (80, abs(len(candidate_name) - len(query)))
+    return (0, 9999)
+
+
+def fetch_gcis_company_details(
+    business_accounting_no: str,
+    details_api_url: str,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    params = {
+        "$format": "json",
+        "$top": "1",
+        "$filter": f"Business_Accounting_NO eq {business_accounting_no}",
+    }
+    try:
+        response = requests.get(
+            details_api_url,
+            params=params,
+            headers={"Accept": "application/json"},
+            timeout=REQUEST_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        return None, {"status": "request_error", "error": str(exc), "request_params": params}
+
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        return None, {
+            "status": "invalid_json",
+            "error": str(exc),
+            "http_status": response.status_code,
+            "content_type": response.headers.get("content-type", ""),
+            "body_preview": response.text[:500],
+            "request_params": params,
+        }
+
+    if not isinstance(payload, list) or not payload:
+        return None, {
+            "status": "no_results",
+            "http_status": response.status_code,
+            "request_params": params,
+        }
+    first = payload[0]
+    if not isinstance(first, dict):
+        return None, {
+            "status": "unexpected_payload",
+            "http_status": response.status_code,
+            "request_params": params,
+        }
+    return first, {
+        "status": "ok",
+        "http_status": response.status_code,
+        "request_params": params,
+    }
+
+
+def enrich_company_with_gcis(
+    company_name: str,
+    keyword_api_url: str,
+    details_api_url: str,
+    cache: dict[str, dict[str, Any] | None],
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    query = clean_company_query(company_name)
+    if not query:
+        return None, {"status": "skipped", "reason": "empty_company_name"}
+    if not should_lookup_gcis_company(query):
+        return None, {"status": "skipped", "reason": "not_company_like", "query": query}
+    if query in cache:
+        cached = cache[query]
+        status = "cache_hit_match" if cached else "cache_hit_no_match"
+        return cached, {"status": status, "query": query}
+
+    candidates, search_meta = search_gcis_company_candidates(query, keyword_api_url)
+    if not candidates:
+        cache[query] = None
+        return None, {"status": "no_candidates", "query": query, "search": search_meta}
+
+    scored_candidates = sorted(
+        candidates,
+        key=lambda candidate: score_gcis_candidate(
+            query,
+            str(candidate.get("Company_Name") or "").strip(),
+        ),
+        reverse=True,
+    )
+    best = scored_candidates[0]
+    best_name = str(best.get("Company_Name") or "").strip()
+    best_score, _ = score_gcis_candidate(query, best_name)
+    if best_score <= 0:
+        cache[query] = None
+        return None, {
+            "status": "no_confident_match",
+            "query": query,
+            "search": search_meta,
+        }
+
+    business_no = str(best.get("Business_Accounting_NO") or "").strip()
+    details = None
+    details_meta: dict[str, Any] = {"status": "skipped", "reason": "missing_business_no"}
+    if business_no:
+        details, details_meta = fetch_gcis_company_details(business_no, details_api_url)
+
+    business_items: list[dict[str, str]] = []
+    if details:
+        raw_items = details.get("Cmp_Business")
+        if isinstance(raw_items, list):
+            for item in raw_items[:10]:
+                if not isinstance(item, dict):
+                    continue
+                business_items.append(
+                    {
+                        "code": str(item.get("Business_Item") or "").strip(),
+                        "description": str(item.get("Business_Item_Desc") or "").strip(),
+                    }
+                )
+
+    company_status = str(best.get("Company_Status_Desc") or best.get("Company_Status") or "").strip()
+    responsible_name = str(best.get("Responsible_Name") or "").strip()
+    company_location = str(best.get("Company_Location") or "").strip()
+    company_setup_date = normalize_date(best.get("Company_Setup_Date") or "")
+    if details:
+        company_status = company_status or str(
+            details.get("Company_Status_Desc") or details.get("Company_Status") or ""
+        ).strip()
+        responsible_name = responsible_name or str(
+            details.get("Responsible_Name") or ""
+        ).strip()
+        company_location = company_location or str(
+            details.get("Company_Location") or ""
+        ).strip()
+        company_setup_date = company_setup_date or normalize_date(
+            details.get("Company_Setup_Date") or ""
+        )
+
+    enriched = {
+        "query": query,
+        "matched_name": best_name,
+        "business_accounting_no": business_no,
+        "company_status": company_status,
+        "responsible_name": responsible_name,
+        "company_location": company_location,
+        "company_setup_date": company_setup_date,
+        "register_organization": str(best.get("Register_Organization_Desc") or "").strip(),
+        "capital_stock_amount": parse_number(best.get("Capital_Stock_Amount") or 0),
+        "paid_in_capital_amount": parse_number(best.get("Paid_In_Capital_Amount") or 0),
+        "business_items": business_items,
+    }
+    cache[query] = enriched
+    return enriched, {
+        "status": "matched",
+        "query": query,
+        "search": search_meta,
+        "details": details_meta,
+    }
+
+
 def fetch_taichung_records() -> tuple[list[dict[str, Any]], dict[str, Any]]:
     print(f"[台中市] 抓取中: {TAICHUNG_JSON_URL}")
     try:
@@ -480,6 +768,7 @@ def upsert_to_supabase(
     service_key: str,
     permit: dict[str, Any],
     maps_data: dict[str, str | None] | None,
+    registry_data: dict[str, Any] | None,
 ) -> None:
     usage = permit["usage"]
     if "住宅" in usage:
@@ -491,8 +780,14 @@ def upsert_to_supabase(
     else:
         project_type = "other"
 
+    company_name = permit["developer_name"]
+    if registry_data:
+        normalized_name = str(registry_data.get("matched_name") or "").strip()
+        if normalized_name:
+            company_name = normalized_name
+
     record: dict[str, Any] = {
-        "company_name": permit["developer_name"],
+        "company_name": company_name,
         "contact_person": permit["architect_name"] or None,
         "address": permit["site_address"],
         "source": f"建照-{permit['source_tag']}-{usage[:4]}",
@@ -555,6 +850,15 @@ def main() -> int:
     target_usages = parse_list_env("TARGET_USAGES", DEFAULT_TARGET_USAGES)
     google_key = os.getenv("GOOGLE_MAPS_API_KEY", "").strip()
     nlma_url = get_env("NLMA_BMLIC_API_URL", DEFAULT_NLMA_BMLIC_API_URL)
+    gcis_lookup_enabled = parse_bool_env("GCIS_COMPANY_LOOKUP_ENABLED", True)
+    gcis_keyword_api_url = get_env(
+        "GCIS_COMPANY_KEYWORD_API_URL",
+        DEFAULT_GCIS_COMPANY_KEYWORD_API_URL,
+    )
+    gcis_details_api_url = get_env(
+        "GCIS_COMPANY_DETAILS_API_URL",
+        DEFAULT_GCIS_COMPANY_DETAILS_API_URL,
+    )
     new_taipei_url = get_env("NEW_TAIPEI_JSON_URL", DEFAULT_NEW_TAIPEI_JSON_URL)
     new_taipei_page_size = parse_int_env(
         "NEW_TAIPEI_PAGE_SIZE", DEFAULT_NEW_TAIPEI_PAGE_SIZE
@@ -599,6 +903,13 @@ def main() -> int:
         "google_maps": {
             "configured": bool(google_key),
         },
+        "gcis_company_registry": {
+            "enabled": gcis_lookup_enabled,
+            "keyword_api_url": gcis_keyword_api_url,
+            "details_api_url": gcis_details_api_url,
+            "lookups_attempted": 0,
+            "matches_found": 0,
+        },
         "raw_record_count": 0,
         "matched_record_count": 0,
         "results": [],
@@ -608,8 +919,11 @@ def main() -> int:
 
     if not google_key:
         print("⚠ 未設定 GOOGLE_MAPS_API_KEY，跳過 Google Maps 補強。")
+    if not gcis_lookup_enabled:
+        print("⚠ 已停用 GCIS 公司名稱正規化。")
 
     all_permits: list[dict[str, Any]] = []
+    gcis_cache: dict[str, dict[str, Any] | None] = {}
 
     nlma_raw, nlma_meta = fetch_nlma_records(nlma_url, start_date, end_date)
     results_payload["sources"]["nlma"]["fetch"] = nlma_meta
@@ -664,6 +978,26 @@ def main() -> int:
         )
 
         result_permit = dict(permit)
+        registry_data = None
+        if gcis_lookup_enabled:
+            results_payload["gcis_company_registry"]["lookups_attempted"] += 1
+            registry_data, registry_meta = enrich_company_with_gcis(
+                permit["developer_name"],
+                gcis_keyword_api_url,
+                gcis_details_api_url,
+                gcis_cache,
+            )
+            result_permit["gcis_company_registry"] = {
+                "match": registry_data,
+                "meta": registry_meta,
+            }
+            if registry_data:
+                results_payload["gcis_company_registry"]["matches_found"] += 1
+                print(
+                    "  GCIS: "
+                    f"{registry_data['matched_name']} | 統編 {registry_data['business_accounting_no']}"
+                )
+
         maps_data = None
         if google_key:
             query = f"{permit['site_address']} {permit['developer_name']}"
@@ -676,7 +1010,13 @@ def main() -> int:
                 result_permit["google_maps_match"] = None
 
         if supabase_ready:
-            upsert_to_supabase(supabase_url, supabase_key, permit, maps_data)
+            upsert_to_supabase(
+                supabase_url,
+                supabase_key,
+                permit,
+                maps_data,
+                registry_data,
+            )
 
         selected_results.append(result_permit)
 

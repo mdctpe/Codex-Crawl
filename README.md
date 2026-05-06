@@ -15,6 +15,9 @@ The crawler checks these variables when it starts:
 - `SUPABASE_SERVICE_KEY`
 - `GOOGLE_MAPS_API_KEY`
 - `NLMA_BMLIC_API_URL`
+- `GCIS_COMPANY_LOOKUP_ENABLED`
+- `GCIS_COMPANY_KEYWORD_API_URL`
+- `GCIS_COMPANY_DETAILS_API_URL`
 - `NEW_TAIPEI_JSON_URL`
 - `NEW_TAIPEI_PAGE_SIZE`
 - `NEW_TAIPEI_MAX_PAGES`
@@ -36,10 +39,16 @@ It also fetches New Taipei City's official building permit open data:
 
 `https://data.ntpc.gov.tw/api/datasets/C1487D7B-FFF1-43D3-A2CE-4716EAB4D286/json`
 
+For company normalization, the crawler can also enrich matched developers through the official GCIS company registry APIs:
+
+- `https://data.gcis.nat.gov.tw/od/data/api/6BBA2268-1367-4B42-9CCA-BC17499EBE8C`
+- `https://data.gcis.nat.gov.tw/od/data/api/236EE382-4942-41A9-BD03-CA0709025E7C`
+
 The current implementation:
 
 - fetches permit records from NLMA, New Taipei City, and Taichung City
 - filters by date range, minimum construction cost, and target usage keywords
+- optionally normalizes company names with GCIS and adds company registry details
 - prints the matching permits
 - optionally enriches each permit with Google Maps text search
 - writes a structured `results/results.json` output file
@@ -82,6 +91,9 @@ Secrets:
 Variables:
 
 - `NLMA_BMLIC_API_URL`
+- `GCIS_COMPANY_LOOKUP_ENABLED`
+- `GCIS_COMPANY_KEYWORD_API_URL`
+- `GCIS_COMPANY_DETAILS_API_URL`
 - `NEW_TAIPEI_JSON_URL`
 - `NEW_TAIPEI_PAGE_SIZE`
 - `NEW_TAIPEI_MAX_PAGES`
