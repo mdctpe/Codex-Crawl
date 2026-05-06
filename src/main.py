@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from datetime import date, datetime, timezone
+from html import escape
 from pathlib import Path
 from typing import Any
 
@@ -102,6 +103,459 @@ def write_results(results_path: str, payload: dict[str, Any]) -> None:
     print(f"Wrote crawler results to: {output_path}")
 
 
+def default_report_path(results_path: str) -> str:
+    return str(Path(results_path).with_name("report.html"))
+
+
+def format_count(value: Any) -> str:
+    if isinstance(value, int):
+        return f"{value:,}"
+    return str(value)
+
+
+def format_money(value: Any) -> str:
+    amount = parse_number(value)
+    if amount <= 0:
+        return "未提供"
+    return f"NT$ {amount:,}"
+
+
+def render_source_card(name: str, data: dict[str, Any]) -> str:
+    fetch = data.get("fetch", {})
+    status = str(fetch.get("status") or "unknown")
+    record_count = fetch.get("record_count")
+    detail_parts = [f"狀態：{escape(status)}"]
+    if record_count is not None:
+        detail_parts.append(f"筆數：{escape(format_count(record_count))}")
+    if fetch.get("error"):
+        detail_parts.append(f"錯誤：{escape(str(fetch['error']))}")
+    return f"""
+    <div class="source-card">
+      <div class="source-name">{escape(name)}</div>
+      <div class="source-url">{escape(str(data.get("url") or ""))}</div>
+      <div class="source-meta">{'<br>'.join(detail_parts)}</div>
+    </div>
+    """
+
+
+def render_result_card(result: dict[str, Any]) -> str:
+    registry_meta = result.get("gcis_company_registry", {})
+    registry_match = registry_meta.get("match") if isinstance(registry_meta, dict) else None
+    maps_match = result.get("google_maps_match")
+
+    detail_rows = [
+        ("來源", result.get("source_tag") or "未提供"),
+        ("建案名稱", result.get("project_name") or "未提供"),
+        ("起造人", result.get("developer_name") or "未提供"),
+        ("建築師", result.get("architect_name") or "未提供"),
+        ("地址", result.get("site_address") or "未提供"),
+        ("造價", format_money(result.get("construction_cost"))),
+        ("用途", result.get("usage") or "未提供"),
+        ("發照日期", result.get("permit_issued_at") or "未提供"),
+        ("執照字號", result.get("permit_number") or "未提供"),
+    ]
+    details_html = "".join(
+        f"<div class=\"detail-row\"><span>{escape(label)}</span><strong>{escape(str(value))}</strong></div>"
+        for label, value in detail_rows
+    )
+
+    registry_html = ""
+    if isinstance(registry_match, dict):
+        business_items = registry_match.get("business_items") or []
+        business_list = "".join(
+            f"<li>{escape(str(item.get('description') or item.get('code') or '未提供'))}</li>"
+            for item in business_items[:5]
+            if isinstance(item, dict)
+        )
+        registry_html = f"""
+        <div class="subsection">
+          <h3>GCIS 公司正規化</h3>
+          <div class="detail-row"><span>正式公司名</span><strong>{escape(str(registry_match.get('matched_name') or '未提供'))}</strong></div>
+          <div class="detail-row"><span>統編</span><strong>{escape(str(registry_match.get('business_accounting_no') or '未提供'))}</strong></div>
+          <div class="detail-row"><span>公司狀態</span><strong>{escape(str(registry_match.get('company_status') or '未提供'))}</strong></div>
+          <div class="detail-row"><span>負責人</span><strong>{escape(str(registry_match.get('responsible_name') or '未提供'))}</strong></div>
+          <div class="detail-row"><span>登記地址</span><strong>{escape(str(registry_match.get('company_location') or '未提供'))}</strong></div>
+          <div class="detail-row"><span>資本額</span><strong>{escape(format_money(registry_match.get('capital_stock_amount')))}</strong></div>
+          {f'<div class="business-items"><div class="label">營業項目</div><ul>{business_list}</ul></div>' if business_list else ''}
+        </div>
+        """
+    elif isinstance(registry_meta, dict):
+        meta = registry_meta.get("meta") or {}
+        registry_html = f"""
+        <div class="subsection muted">
+          <h3>GCIS 公司正規化</h3>
+          <p>{escape(str(meta.get('reason') or meta.get('status') or '未匹配'))}</p>
+        </div>
+        """
+
+    maps_html = ""
+    if isinstance(maps_match, dict):
+        maps_html = f"""
+        <div class="subsection">
+          <h3>Google Maps</h3>
+          <div class="detail-row"><span>名稱</span><strong>{escape(str(maps_match.get('name') or '未提供'))}</strong></div>
+          <div class="detail-row"><span>地址</span><strong>{escape(str(maps_match.get('formatted_address') or '未提供'))}</strong></div>
+          <div class="detail-row"><span>Place ID</span><strong>{escape(str(maps_match.get('place_id') or '未提供'))}</strong></div>
+        </div>
+        """
+
+    return f"""
+    <article class="result-card">
+      <div class="card-top">
+        <span class="source-pill">{escape(str(result.get('source_tag') or '未知來源'))}</span>
+        <span class="budget-pill">{escape(format_money(result.get('construction_cost')))}</span>
+      </div>
+      <h2>{escape(str(result.get('project_name') or '未命名建案'))}</h2>
+      <div class="details-grid">{details_html}</div>
+      {registry_html}
+      {maps_html}
+    </article>
+    """
+
+
+def write_report(report_path: str, payload: dict[str, Any]) -> None:
+    output_path = Path(report_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    sources = payload.get("sources", {})
+    source_cards = "".join(
+        render_source_card(str(name), data)
+        for name, data in sources.items()
+        if isinstance(data, dict)
+    )
+    results = payload.get("results", [])
+    result_cards = "".join(
+        render_result_card(result)
+        for result in results
+        if isinstance(result, dict)
+    ) or '<div class="empty-state">這次沒有可顯示的名單結果。</div>'
+
+    status = str(payload.get("status") or "unknown")
+    filters = payload.get("filters", {})
+    report_html = f"""<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Weekly Crawl Report</title>
+  <style>
+    :root {{
+      --bg: #f4efe7;
+      --panel: rgba(255,255,255,0.86);
+      --ink: #1f2a1f;
+      --muted: #5b6659;
+      --line: rgba(31,42,31,0.10);
+      --accent: #c86b29;
+      --accent-soft: #f2d5bf;
+      --olive: #53624a;
+      --shadow: 0 18px 50px rgba(76, 63, 45, 0.10);
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      font-family: "Avenir Next", "PingFang TC", "Noto Sans TC", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, rgba(200,107,41,0.18), transparent 28%),
+        radial-gradient(circle at top right, rgba(83,98,74,0.16), transparent 30%),
+        linear-gradient(180deg, #f8f4ec 0%, var(--bg) 100%);
+    }}
+    .wrap {{
+      width: min(1180px, calc(100vw - 32px));
+      margin: 0 auto;
+      padding: 32px 0 72px;
+    }}
+    .hero {{
+      background: linear-gradient(135deg, rgba(255,255,255,0.92), rgba(255,248,240,0.88));
+      border: 1px solid rgba(200,107,41,0.14);
+      border-radius: 28px;
+      padding: 28px;
+      box-shadow: var(--shadow);
+      overflow: hidden;
+      position: relative;
+    }}
+    .hero::after {{
+      content: "";
+      position: absolute;
+      inset: auto -40px -60px auto;
+      width: 220px;
+      height: 220px;
+      background: radial-gradient(circle, rgba(200,107,41,0.24), transparent 70%);
+      pointer-events: none;
+    }}
+    .eyebrow {{
+      display: inline-block;
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }}
+    h1 {{
+      margin: 14px 0 8px;
+      font-size: clamp(30px, 4vw, 52px);
+      line-height: 0.98;
+    }}
+    .subtitle {{
+      margin: 0;
+      color: var(--muted);
+      max-width: 760px;
+      font-size: 16px;
+      line-height: 1.6;
+    }}
+    .summary-grid, .source-grid, .results-grid {{
+      display: grid;
+      gap: 16px;
+    }}
+    .summary-grid {{
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      margin-top: 24px;
+    }}
+    .summary-card, .source-card, .result-card, .filter-panel {{
+      background: var(--panel);
+      backdrop-filter: blur(10px);
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      box-shadow: var(--shadow);
+    }}
+    .summary-card {{
+      padding: 20px;
+    }}
+    .summary-card .label {{
+      color: var(--muted);
+      font-size: 13px;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }}
+    .summary-card strong {{
+      display: block;
+      margin-top: 8px;
+      font-size: 28px;
+    }}
+    .section-head {{
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: end;
+      margin: 28px 0 14px;
+    }}
+    .section-head h2 {{
+      margin: 0;
+      font-size: 24px;
+    }}
+    .section-head p {{
+      margin: 4px 0 0;
+      color: var(--muted);
+    }}
+    .source-grid {{
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    }}
+    .source-card, .filter-panel {{
+      padding: 18px 20px;
+    }}
+    .source-name {{
+      font-size: 18px;
+      font-weight: 700;
+    }}
+    .source-url {{
+      margin-top: 6px;
+      color: var(--muted);
+      font-size: 13px;
+      word-break: break-all;
+    }}
+    .source-meta {{
+      margin-top: 12px;
+      font-size: 14px;
+      line-height: 1.6;
+    }}
+    .filter-grid {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 12px;
+      margin-top: 12px;
+    }}
+    .filter-chip {{
+      padding: 12px 14px;
+      border-radius: 16px;
+      background: rgba(83,98,74,0.08);
+      color: var(--olive);
+      font-size: 14px;
+    }}
+    .results-grid {{
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    }}
+    .result-card {{
+      padding: 22px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }}
+    .card-top {{
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: center;
+    }}
+    .source-pill, .budget-pill {{
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      padding: 8px 12px;
+      font-size: 13px;
+      font-weight: 700;
+    }}
+    .source-pill {{
+      background: rgba(83,98,74,0.12);
+      color: var(--olive);
+    }}
+    .budget-pill {{
+      background: rgba(200,107,41,0.12);
+      color: var(--accent);
+    }}
+    .result-card h2 {{
+      margin: 0;
+      font-size: 24px;
+      line-height: 1.15;
+    }}
+    .details-grid {{
+      display: grid;
+      gap: 10px;
+    }}
+    .detail-row {{
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: start;
+      border-bottom: 1px dashed rgba(31,42,31,0.08);
+      padding-bottom: 8px;
+    }}
+    .detail-row span {{
+      color: var(--muted);
+      min-width: 76px;
+    }}
+    .detail-row strong {{
+      text-align: right;
+      font-weight: 600;
+      word-break: break-word;
+    }}
+    .subsection {{
+      padding: 14px 16px;
+      border-radius: 18px;
+      background: rgba(83,98,74,0.05);
+    }}
+    .subsection h3 {{
+      margin: 0 0 10px;
+      font-size: 15px;
+    }}
+    .subsection.muted {{
+      color: var(--muted);
+    }}
+    .business-items .label {{
+      margin-top: 12px;
+      color: var(--muted);
+      font-size: 13px;
+    }}
+    .business-items ul {{
+      margin: 8px 0 0 18px;
+      padding: 0;
+      line-height: 1.6;
+    }}
+    .empty-state {{
+      padding: 24px;
+      border-radius: 22px;
+      background: var(--panel);
+      border: 1px dashed var(--line);
+      color: var(--muted);
+      text-align: center;
+    }}
+    footer {{
+      margin-top: 26px;
+      color: var(--muted);
+      font-size: 13px;
+      text-align: center;
+    }}
+    @media (max-width: 720px) {{
+      .wrap {{
+        width: min(100vw - 20px, 1180px);
+        padding-top: 20px;
+      }}
+      .hero, .summary-card, .source-card, .result-card, .filter-panel {{
+        border-radius: 18px;
+      }}
+      .detail-row {{
+        flex-direction: column;
+      }}
+      .detail-row strong {{
+        text-align: left;
+      }}
+    }}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <section class="hero">
+      <span class="eyebrow">Crawler Report</span>
+      <h1>建案名單總覽</h1>
+      <p class="subtitle">這份頁面會隨每次 crawler 執行自動更新，整合來源抓取狀態、篩選條件，以及目前可直接交給團隊看的名單內容。</p>
+      <div class="summary-grid">
+        <div class="summary-card"><div class="label">執行狀態</div><strong>{escape(status)}</strong></div>
+        <div class="summary-card"><div class="label">原始資料</div><strong>{escape(format_count(payload.get('raw_record_count', 0)))}</strong></div>
+        <div class="summary-card"><div class="label">符合條件</div><strong>{escape(format_count(payload.get('matched_record_count', 0)))}</strong></div>
+        <div class="summary-card"><div class="label">GCIS 匹配</div><strong>{escape(format_count((payload.get('gcis_company_registry') or {}).get('matches_found', 0)))}</strong></div>
+      </div>
+    </section>
+
+    <div class="section-head">
+      <div>
+        <h2>來源狀態</h2>
+        <p>快速檢查哪個來源今天有回資料，哪個來源仍然不穩。</p>
+      </div>
+    </div>
+    <section class="source-grid">{source_cards}</section>
+
+    <div class="section-head">
+      <div>
+        <h2>篩選條件</h2>
+        <p>目前這次報表使用的條件設定。</p>
+      </div>
+    </div>
+    <section class="filter-panel">
+      <div class="filter-grid">
+        <div class="filter-chip">起始日期：{escape(str(filters.get('start_date') or '未提供'))}</div>
+        <div class="filter-chip">結束日期：{escape(str(filters.get('end_date') or '未提供'))}</div>
+        <div class="filter-chip">最低造價：{escape(format_money(filters.get('min_construction_cost')))}</div>
+        <div class="filter-chip">最多顯示：{escape(format_count(filters.get('max_projects') or 0))}</div>
+        <div class="filter-chip">用途關鍵字：{escape(', '.join(filters.get('target_usages') or []) or '不限')}</div>
+      </div>
+    </section>
+
+    <div class="section-head">
+      <div>
+        <h2>名單結果</h2>
+        <p>優先顯示已符合篩選條件的案件，GCIS 與 Google Maps 會在可用時補強。</p>
+      </div>
+    </div>
+    <section class="results-grid">{result_cards}</section>
+
+    <footer>
+      產出時間：{escape(str(payload.get('finished_at') or payload.get('started_at') or '未提供'))}
+    </footer>
+  </div>
+</body>
+</html>
+"""
+    output_path.write_text(report_html, encoding="utf-8")
+    print(f"Wrote crawler report to: {output_path}")
+
+
+def write_outputs(results_path: str, report_path: str, payload: dict[str, Any]) -> None:
+    write_results(results_path, payload)
+    write_report(report_path, payload)
+
+
 def parse_number(value: Any) -> int:
     if isinstance(value, (int, float)):
         return int(value)
@@ -152,6 +606,8 @@ def clean_company_query(name: str) -> str:
     candidate = name.strip()
     if not candidate or candidate == "待補":
         return ""
+    for marker in ("負責人：", "負責人:", "代表人：", "代表人:", "校長：", "校長:"):
+        candidate = candidate.split(marker, 1)[0].strip()
     for separator in ("，", ",", "；", ";", "\n"):
         candidate = candidate.split(separator, 1)[0].strip()
     candidate = candidate.replace("（", "(").replace("）", ")")
@@ -833,6 +1289,7 @@ def main() -> int:
     print(f"Crawler started at: {started_at}")
     load_environment()
     results_path = get_env("RESULTS_PATH", DEFAULT_RESULTS_PATH)
+    report_path = get_env("REPORT_PATH", default_report_path(results_path))
 
     supabase_url = os.getenv("SUPABASE_URL", "").strip()
     supabase_key = os.getenv("SUPABASE_SERVICE_KEY", "").strip()
@@ -872,6 +1329,7 @@ def main() -> int:
         "finished_at": None,
         "status": "running",
         "results_path": results_path,
+        "report_path": report_path,
         "sources": {
             "nlma": {"url": nlma_url, "fetch": {}},
             "new_taipei": {
@@ -948,7 +1406,7 @@ def main() -> int:
         print("無任何原始資料。Exiting successfully.")
         results_payload["status"] = "no_source_records"
         results_payload["finished_at"] = datetime.now(timezone.utc).isoformat()
-        write_results(results_path, results_payload)
+        write_outputs(results_path, report_path, results_payload)
         return 0
 
     filtered = [
@@ -963,7 +1421,7 @@ def main() -> int:
         print("篩選後無符合資料。Exiting successfully.")
         results_payload["status"] = "no_matching_permits"
         results_payload["finished_at"] = datetime.now(timezone.utc).isoformat()
-        write_results(results_path, results_payload)
+        write_outputs(results_path, report_path, results_payload)
         return 0
 
     print(f"✓ 符合條件: {len(filtered)} 筆，處理前 {max_projects} 筆。\n")
@@ -1023,7 +1481,7 @@ def main() -> int:
     results_payload["results"] = selected_results
     results_payload["status"] = "completed"
     results_payload["finished_at"] = datetime.now(timezone.utc).isoformat()
-    write_results(results_path, results_payload)
+    write_outputs(results_path, report_path, results_payload)
     print("\nCrawler completed successfully.")
     return 0
 

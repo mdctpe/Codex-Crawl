@@ -38,6 +38,7 @@ jobs:
           MAX_PROJECTS: ${{ vars.MAX_PROJECTS }}
           TARGET_USAGES: ${{ vars.TARGET_USAGES }}
           RESULTS_PATH: results/results.json
+          REPORT_PATH: results/report.html
         run: python -m src.main
 
       - name: Upload crawler results
@@ -45,5 +46,5 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: weekly-crawl-results
-          path: results/results.json
+          path: results/
           if-no-files-found: error

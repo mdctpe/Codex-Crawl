@@ -26,6 +26,7 @@ The crawler checks these variables when it starts:
 - `MIN_CONSTRUCTION_COST`
 - `MAX_PROJECTS`
 - `TARGET_USAGES`
+- `REPORT_PATH`
 
 If the Supabase secrets are missing, the script prints a clear message and continues because the scaffold does not write to Supabase yet.
 
@@ -52,6 +53,7 @@ The current implementation:
 - prints the matching permits
 - optionally enriches each permit with Google Maps text search
 - writes a structured `results/results.json` output file
+- generates a human-friendly `results/report.html` page for the team
 
 ## Local Configuration
 
@@ -77,6 +79,10 @@ GOOGLE_MAPS_API_KEY=your-key python -m src.main
 After the run finishes, inspect:
 
 `results/results.json`
+
+and
+
+`results/report.html`
 
 ## GitHub Configuration
 
@@ -111,3 +117,4 @@ The workflow lives at `.github/workflows/weekly-crawl.yml` and runs:
 - whenever `workflow_dispatch` is triggered manually
 
 Each workflow run uploads `results/results.json` as an artifact named `weekly-crawl-results`.
+The artifact now includes the HTML report too.
