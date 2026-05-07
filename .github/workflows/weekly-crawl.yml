@@ -1,0 +1,94 @@
+name: Weekly Crawl
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 0 * * 1"
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "github-pages"
+  cancel-in-progress: true
+
+jobs:
+  crawl:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run crawler
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          GOOGLE_MAPS_API_KEY: ${{ secrets.GOOGLE_MAPS_API_KEY }}
+          NLMA_BMLIC_API_URL: ${{ vars.NLMA_BMLIC_API_URL }}
+          GCIS_COMPANY_LOOKUP_ENABLED: ${{ vars.GCIS_COMPANY_LOOKUP_ENABLED }}
+          GCIS_COMPANY_KEYWORD_API_URL: ${{ vars.GCIS_COMPANY_KEYWORD_API_URL }}
+          GCIS_COMPANY_DETAILS_API_URL: ${{ vars.GCIS_COMPANY_DETAILS_API_URL }}
+          NEW_TAIPEI_JSON_URL: ${{ vars.NEW_TAIPEI_JSON_URL }}
+          NEW_TAIPEI_PAGE_SIZE: ${{ vars.NEW_TAIPEI_PAGE_SIZE }}
+          NEW_TAIPEI_MAX_PAGES: ${{ vars.NEW_TAIPEI_MAX_PAGES }}
+          TAIPEI_HISTORY_XML_URL: ${{ vars.TAIPEI_HISTORY_XML_URL }}
+          TAIPEI_CURRENT_XML_URL: ${{ vars.TAIPEI_CURRENT_XML_URL }}
+          PERMIT_START_DATE: ${{ vars.PERMIT_START_DATE }}
+          PERMIT_END_DATE: ${{ vars.PERMIT_END_DATE }}
+          MIN_CONSTRUCTION_COST: ${{ vars.MIN_CONSTRUCTION_COST }}
+          MAX_PROJECTS: ${{ vars.MAX_PROJECTS }}
+          TARGET_USAGES: ${{ vars.TARGET_USAGES }}
+          SHARED_APP_ALLOWED_EMAIL_DOMAIN: ${{ vars.SHARED_APP_ALLOWED_EMAIL_DOMAIN }}
+          SHARED_APP_TABLE: ${{ vars.SHARED_APP_TABLE }}
+          RESULTS_PATH: results/results.json
+          REPORT_PATH: results/report.html
+          INDEX_PATH: results/index.html
+          TRACKER_PATH: results/tracker.csv
+          SITE_OUTPUT_DIR: site
+        run: python -m src.main
+
+      - name: Upload crawler results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: weekly-crawl-results
+          path: |
+            results/
+            site/
+          if-no-files-found: error
+
+      - name: Upload GitHub Pages artifact
+        if: success()
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: site/
+
+  deploy:
+    if: needs.crawl.result == 'success'
+    needs: crawl
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

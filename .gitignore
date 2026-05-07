@@ -1,0 +1,22 @@
+__pycache__/
+.pycache/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+.env
+results/
+site/
+
+.DS_Store
+
+# Legacy project files excluded from the minimal Python crawler.
+.replit
+docs/
+artifacts/
+node_modules/
+dist/
+package.json
+package-lock.json
+*.ts
+*.tsx
