@@ -13,6 +13,8 @@ import xml.etree.ElementTree as ET
 
 import requests
 
+from .shared_site import write_secure_site
+
 DEFAULT_TARGET_USAGES: tuple[str, ...] = ()
 DEFAULT_MIN_CONSTRUCTION_COST = 0
 DEFAULT_MAX_PROJECTS = 200
@@ -47,6 +49,9 @@ REQUEST_TIMEOUT_SECONDS = 45
 DEFAULT_RESULTS_PATH = "results/results.json"
 DEFAULT_NEW_TAIPEI_PAGE_SIZE = 200
 DEFAULT_NEW_TAIPEI_MAX_PAGES = 3
+DEFAULT_SITE_OUTPUT_DIR = "site"
+DEFAULT_SHARED_APP_TABLE = "crawler_leads"
+DEFAULT_ALLOWED_EMAIL_DOMAIN = "eonian.space"
 TRACKER_STATUS_OPTIONS: tuple[str, ...] = (
     "未處理",
     "待分派",
@@ -1048,12 +1053,20 @@ def write_tracker_csv(tracker_path: str, payload: dict[str, Any]) -> None:
     print(f"Wrote tracker CSV to: {output_path}")
 
 
-def write_outputs(results_path: str, report_path: str, payload: dict[str, Any]) -> None:
+def write_outputs(
+    results_path: str,
+    report_path: str,
+    payload: dict[str, Any],
+    shared_app_config: dict[str, Any],
+) -> None:
     write_results(results_path, payload)
     write_report(report_path, payload)
     tracker_path = str(payload.get("tracker_path") or "")
     if tracker_path:
         write_tracker_csv(tracker_path, payload)
+    site_output_dir = str(shared_app_config.get("site_output_dir") or "")
+    if site_output_dir:
+        write_secure_site(site_output_dir, payload, shared_app_config)
 
 
 def parse_number(value: Any) -> int:
@@ -1964,6 +1977,116 @@ def upsert_to_supabase(
         print(f"  ✗ 連線錯誤: {exc}")
 
 
+def build_shared_lead_record(
+    permit: dict[str, Any],
+    finished_at: str,
+) -> dict[str, Any]:
+    registry_match = (
+        permit.get("gcis_company_registry", {}).get("match")
+        if isinstance(permit.get("gcis_company_registry"), dict)
+        else None
+    )
+    maps_match = permit.get("google_maps_match")
+    maps_url = None
+    if isinstance(maps_match, dict):
+        place_id = str(maps_match.get("place_id") or "").strip()
+        if place_id:
+            maps_url = f"https://www.google.com/maps/place/?q=place_id:{place_id}"
+
+    return {
+        "lead_id": permit.get("lead_id") or make_lead_id(permit),
+        "source_tag": permit.get("source_tag") or "",
+        "region": permit.get("region") or "",
+        "permit_number": permit.get("permit_number") or "",
+        "project_name": permit.get("project_name") or "",
+        "developer_name": permit.get("developer_name") or "",
+        "architect_name": permit.get("architect_name") or "",
+        "constructor_name": permit.get("constructor_name") or None,
+        "site_address": permit.get("site_address") or "",
+        "construction_cost": parse_number(permit.get("construction_cost")),
+        "permit_issued_at": normalize_date(permit.get("permit_issued_at")) or None,
+        "usage": permit.get("usage") or "",
+        "land_use_zoning": permit.get("land_use_zoning") or None,
+        "gcis_company_name": (
+            registry_match.get("matched_name") if isinstance(registry_match, dict) else None
+        ),
+        "gcis_business_no": (
+            registry_match.get("business_accounting_no")
+            if isinstance(registry_match, dict)
+            else None
+        ),
+        "gcis_company_status": (
+            registry_match.get("company_status") if isinstance(registry_match, dict) else None
+        ),
+        "gcis_responsible_name": (
+            registry_match.get("responsible_name")
+            if isinstance(registry_match, dict)
+            else None
+        ),
+        "gcis_company_location": (
+            registry_match.get("company_location")
+            if isinstance(registry_match, dict)
+            else None
+        ),
+        "google_maps_name": (
+            maps_match.get("name") if isinstance(maps_match, dict) else None
+        ),
+        "google_maps_address": (
+            maps_match.get("formatted_address")
+            if isinstance(maps_match, dict)
+            else None
+        ),
+        "google_maps_place_id": (
+            maps_match.get("place_id") if isinstance(maps_match, dict) else None
+        ),
+        "google_maps_url": maps_url,
+        "last_crawled_at": finished_at,
+    }
+
+
+def upsert_shared_leads_to_supabase(
+    supabase_url: str,
+    service_key: str,
+    table_name: str,
+    permits: list[dict[str, Any]],
+    finished_at: str,
+) -> None:
+    if not permits:
+        return
+
+    headers = {
+        "apikey": service_key,
+        "Authorization": f"Bearer {service_key}",
+        "Content-Type": "application/json",
+        "Prefer": "resolution=merge-duplicates,return=minimal",
+    }
+    records = [build_shared_lead_record(permit, finished_at) for permit in permits]
+    chunk_size = 100
+    success_count = 0
+
+    for start in range(0, len(records), chunk_size):
+        chunk = records[start : start + chunk_size]
+        try:
+            response = requests.post(
+                f"{supabase_url}/rest/v1/{table_name}?on_conflict=lead_id",
+                headers=headers,
+                data=json.dumps(chunk),
+                timeout=30,
+            )
+            if response.ok:
+                success_count += len(chunk)
+            else:
+                print(
+                    f"  ✗ Shared leads 寫入失敗 ({response.status_code}): "
+                    f"{response.text[:200]}"
+                )
+        except requests.RequestException as exc:
+            print(f"  ✗ Shared leads 連線錯誤: {exc}")
+
+    if success_count:
+        print(f"  ✓ Shared leads: 已同步 {success_count} 筆到 {table_name}")
+
+
 def main() -> int:
     started_at = datetime.now(timezone.utc).isoformat()
     print(f"Crawler started at: {started_at}")
@@ -1972,15 +2095,28 @@ def main() -> int:
     report_path = get_env("REPORT_PATH", default_report_path(results_path))
     index_path = get_env("INDEX_PATH", default_index_path(results_path))
     tracker_path = get_env("TRACKER_PATH", default_tracker_path(results_path))
+    site_output_dir = get_env("SITE_OUTPUT_DIR", DEFAULT_SITE_OUTPUT_DIR)
 
     supabase_url = os.getenv("SUPABASE_URL", "").strip()
     supabase_key = os.getenv("SUPABASE_SERVICE_KEY", "").strip()
+    supabase_publishable_key = (
+        os.getenv("SUPABASE_PUBLISHABLE_KEY", "").strip()
+        or os.getenv("SUPABASE_ANON_KEY", "").strip()
+    )
     supabase_ready = bool(supabase_url and supabase_key)
+    allowed_email_domain = get_env(
+        "SHARED_APP_ALLOWED_EMAIL_DOMAIN", DEFAULT_ALLOWED_EMAIL_DOMAIN
+    ).lstrip("@")
+    shared_app_table = get_env("SHARED_APP_TABLE", DEFAULT_SHARED_APP_TABLE)
 
     if supabase_ready:
         print("✓ Supabase 設定確認，資料將寫入 leads 表。")
     else:
         print("⚠ Supabase 未設定，資料只會 print。")
+    if supabase_publishable_key:
+        print(f"✓ 內部頁面已設定登入金鑰，將限制 @{allowed_email_domain}。")
+    else:
+        print("⚠ 尚未設定 SUPABASE_PUBLISHABLE_KEY，內部登入頁只會顯示設定提示。")
 
     start_date = get_env("PERMIT_START_DATE", "2023-01-01")
     end_date = get_env("PERMIT_END_DATE", datetime.now(timezone.utc).date().isoformat())
@@ -2014,6 +2150,15 @@ def main() -> int:
         DEFAULT_TAIPEI_CURRENT_XML_URL,
     )
     report_alias_path = dated_report_path(report_path, start_date, end_date)
+    shared_app_config = {
+        "site_output_dir": site_output_dir,
+        "supabase_url": supabase_url,
+        "supabase_key": supabase_publishable_key,
+        "allowedEmailDomain": allowed_email_domain,
+        "sharedTable": shared_app_table,
+        "maxProjects": max_projects,
+        "report_alias_name": Path(report_alias_path).name,
+    }
 
     results_payload: dict[str, Any] = {
         "started_at": started_at,
@@ -2024,6 +2169,7 @@ def main() -> int:
         "index_path": index_path,
         "tracker_path": tracker_path,
         "report_alias_path": report_alias_path,
+        "site_output_dir": site_output_dir,
         "sources": {
             "nlma": {"url": nlma_url, "fetch": {}},
             "new_taipei": {
@@ -2048,6 +2194,7 @@ def main() -> int:
         },
         "supabase": {
             "configured": supabase_ready,
+            "publishable_key_configured": bool(supabase_publishable_key),
             "missing": [
                 name
                 for name, value in (
@@ -2059,6 +2206,12 @@ def main() -> int:
         },
         "google_maps": {
             "configured": bool(google_key),
+        },
+        "shared_app": {
+            "site_output_dir": site_output_dir,
+            "allowed_email_domain": allowed_email_domain,
+            "table": shared_app_table,
+            "publishable_key_configured": bool(supabase_publishable_key),
         },
         "gcis_company_registry": {
             "enabled": gcis_lookup_enabled,
@@ -2112,7 +2265,7 @@ def main() -> int:
         print("無任何原始資料。Exiting successfully.")
         results_payload["status"] = "no_source_records"
         results_payload["finished_at"] = datetime.now(timezone.utc).isoformat()
-        write_outputs(results_path, report_path, results_payload)
+        write_outputs(results_path, report_path, results_payload, shared_app_config)
         return 0
 
     filtered = [
@@ -2127,7 +2280,7 @@ def main() -> int:
         print("篩選後無符合資料。Exiting successfully.")
         results_payload["status"] = "no_matching_permits"
         results_payload["finished_at"] = datetime.now(timezone.utc).isoformat()
-        write_outputs(results_path, report_path, results_payload)
+        write_outputs(results_path, report_path, results_payload, shared_app_config)
         return 0
 
     print(f"✓ 符合條件: {len(filtered)} 筆，處理前 {max_projects} 筆。\n")
@@ -2190,7 +2343,15 @@ def main() -> int:
     results_payload["results"] = selected_results
     results_payload["status"] = "completed"
     results_payload["finished_at"] = datetime.now(timezone.utc).isoformat()
-    write_outputs(results_path, report_path, results_payload)
+    if supabase_ready:
+        upsert_shared_leads_to_supabase(
+            supabase_url,
+            supabase_key,
+            shared_app_table,
+            selected_results,
+            str(results_payload["finished_at"]),
+        )
+    write_outputs(results_path, report_path, results_payload, shared_app_config)
     print("\nCrawler completed successfully.")
     return 0
 

@@ -39,6 +39,8 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
           GOOGLE_MAPS_API_KEY: ${{ secrets.GOOGLE_MAPS_API_KEY }}
           NLMA_BMLIC_API_URL: ${{ vars.NLMA_BMLIC_API_URL }}
           GCIS_COMPANY_LOOKUP_ENABLED: ${{ vars.GCIS_COMPANY_LOOKUP_ENABLED }}
@@ -54,10 +56,13 @@ jobs:
           MIN_CONSTRUCTION_COST: ${{ vars.MIN_CONSTRUCTION_COST }}
           MAX_PROJECTS: ${{ vars.MAX_PROJECTS }}
           TARGET_USAGES: ${{ vars.TARGET_USAGES }}
+          SHARED_APP_ALLOWED_EMAIL_DOMAIN: ${{ vars.SHARED_APP_ALLOWED_EMAIL_DOMAIN }}
+          SHARED_APP_TABLE: ${{ vars.SHARED_APP_TABLE }}
           RESULTS_PATH: results/results.json
           REPORT_PATH: results/report.html
           INDEX_PATH: results/index.html
           TRACKER_PATH: results/tracker.csv
+          SITE_OUTPUT_DIR: site
         run: python -m src.main
 
       - name: Upload crawler results
@@ -65,14 +70,16 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: weekly-crawl-results
-          path: results/
+          path: |
+            results/
+            site/
           if-no-files-found: error
 
       - name: Upload GitHub Pages artifact
         if: success()
         uses: actions/upload-pages-artifact@v4
         with:
-          path: results/
+          path: site/
 
   deploy:
     if: needs.crawl.result == 'success'
